@@ -1,0 +1,50 @@
+data:
+  raw_dir: data/raw
+  processed_dir: data/processed
+  target_col: payprice
+  train_frac: 0.70
+  val_frac: 0.15
+  test_frac: 0.15
+
+features:
+  categorical:
+    - weekday
+    - hour
+    - region
+    - city
+    - adexchange
+    - slotformat
+    - slotvisibility
+    - useragent
+  continuous:
+    - slotwidth
+    - slotheight
+    - slotprice
+  embedding_dim: 16
+  time_encoding: sincos
+
+model:
+  hidden_dim: 128
+  num_heads: 4
+  num_layers: 3
+  ffn_dim: 256
+  dropout: 0.1
+
+training:
+  batch_size: 1024
+  max_epochs: 50
+  learning_rate: 3.0e-4
+  weight_decay: 1.0e-5
+  early_stopping_patience: 5
+  grad_clip: 1.0
+  seed: 42
+
+evaluation:
+  percentiles: [10, 20, 30, 40, 50, 60, 70, 80, 90]
+  impression_value: 1.50
+  bid_shading_fallback: 0.70
+
+export:
+  onnx_path: exports/bid_model.onnx
+  opset_version: 17
+  validation_samples: 1000
