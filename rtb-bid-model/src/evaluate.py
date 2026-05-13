@@ -1,341 +1,374 @@
 import os
-import sys
+import math
+import time
+import argparse
 import pickle
-import torch
 import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from scipy import stats
+import torch
+import torch.nn.functional as F
 
-sys.path.append("src")
-from dataset import get_dataloader, BidDataset
-from model import BidTransformer, MLPBaseline, load_artifacts
-from loss import NLLLoss
-from bid_optimizer import compute_optimal_bid, compute_naive_bid, compute_bid_regret, IMPRESSION_VALUE
-from torch.utils.data import DataLoader
-
-CHECKPOINT_DIR = "exports"
-PLOT_DIR = "results/plots"
-PROCESSED_DIR = "data/processed"
-BATCH_SIZE = 1024
-PERCENTILES = [10, 20, 30, 40, 50, 60, 70, 80, 90]
+from config import load_config
+from dataset import BidDataset, load_artifacts
+from model import MDN, DiscreteBins, build_vocab_sizes
+from loss import mdn_log_prob
+from bid_optimizer import (
+    grid_optimize_mdn, grid_optimize_bins, newton_optimize_mdn, newton_optimize_bins,
+    perfect_profit, regret,
+)
 
 
-def load_model(model_class, checkpoint_path, artifacts, device):
-    model = model_class(artifacts)
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(checkpoint["model_state_dict"])
-    model.eval()
-    model.to(device)
-    print(f"loaded {checkpoint_path} epoch {checkpoint['epoch']} val_loss={checkpoint['val_loss']:.4f}")
-    return model
+def to_dev(d, device):
+    """Move all tensors in a dict to the target device."""
+    out = {}
+    for k, v in d.items():
+        out[k] = v.to(device, non_blocking=True)
+    return out
 
 
-def run_transformer_inference(model, loader, device):
-    # runs the full test set through the transformer, collecting mu, sigma, and raw targets
-    all_mu = []
-    all_sigma = []
-    all_log_targets = []
-    all_raw_targets = []
-
-    with torch.no_grad():
-        for cats, conts, tags, log_targets, raw_targets in loader:
-            cats = cats.to(device)
-            conts = conts.to(device)
-            tags = tags.to(device)
-            mu, sigma = model(cats, conts, tags)
-            all_mu.append(mu.cpu())
-            all_sigma.append(sigma.cpu())
-            all_log_targets.append(log_targets)
-            all_raw_targets.append(raw_targets)
-
-    all_mu = torch.cat(all_mu)
-    all_sigma = torch.cat(all_sigma)
-    all_log_targets = torch.cat(all_log_targets)
-    all_raw_targets = torch.cat(all_raw_targets)
-    return all_mu, all_sigma, all_log_targets, all_raw_targets
-
-
-def run_mlp_inference(model, loader, device):
-    # runs the full test set through the MLP, collecting point predictions and targets
-    all_preds = []
-    all_log_targets = []
-    all_raw_targets = []
-
-    with torch.no_grad():
-        for cats, conts, tags, log_targets, raw_targets in loader:
-            cats = cats.to(device)
-            conts = conts.to(device)
-            tags = tags.to(device)
-            pred = model(cats, conts, tags)
-            all_preds.append(pred.cpu())
-            all_log_targets.append(log_targets)
-            all_raw_targets.append(raw_targets)
-
-    all_preds = torch.cat(all_preds)
-    all_log_targets = torch.cat(all_log_targets)
-    all_raw_targets = torch.cat(all_raw_targets)
-    return all_preds, all_log_targets, all_raw_targets
+def load_model(ckpt_path, device):
+    """Load checkpoint and rebuild the model from its saved config."""
+    ck = torch.load(ckpt_path, map_location=device, weights_only=False)
+    cfg = ck['config']
+    if cfg['model_type'] == 'mdn':
+        model = MDN(
+            vocab_sizes=cfg['vocab_sizes'],
+            emb_dims=cfg['emb_dims'],
+            tag_vocab_size=cfg['tag_vocab_size'],
+            tag_emb_dim=cfg['tag_emb_dim'],
+            num_continuous=cfg['num_continuous'],
+            hidden=cfg['hidden'],
+            dropout=cfg['dropout'],
+            K=cfg['K'],
+            sigma_floor=cfg['sigma_floor'],
+        )
+    else:
+        model = DiscreteBins(
+            vocab_sizes=cfg['vocab_sizes'],
+            emb_dims=cfg['emb_dims'],
+            tag_vocab_size=cfg['tag_vocab_size'],
+            tag_emb_dim=cfg['tag_emb_dim'],
+            num_continuous=cfg['num_continuous'],
+            hidden=cfg['hidden'],
+            dropout=cfg['dropout'],
+            num_bins=cfg['num_bins'],
+        )
+    model.load_state_dict(ck['full_state_dict'], strict=False)
+    model = model.to(device).eval()
+    return model, cfg
 
 
-def compute_held_out_nll(mu, sigma, log_targets):
-    # NLL on the test set -- this is my main metric for distribution quality
-    sigma_clamped = sigma.clamp(min=1e-3, max=10.0)
-    nll = torch.log(sigma_clamped) + (log_targets - mu) ** 2 / (2 * sigma_clamped ** 2)
-    return nll.mean().item()
+@torch.no_grad()
+def collect_predictions(model, ds, device, model_type, batch_size, num_bins=None):
+    """Run the model on every sample and collect outputs.
+    For MDN: stores pi_logits, mu, sigma, and per-sample log probability.
+    For bins: stores the full probability vector and per-sample log probability.
+    Also stores ground truth (payprice, log_payprice, bidding_price) for metrics.
+    """
+    out = {'log_pp': [], 'pp': [], 'bid': []}
+    if model_type == 'mdn':
+        out['pi_logits'] = []
+        out['mu'] = []
+        out['sigma'] = []
+        out['log_prob'] = []
+    else:
+        out['probs'] = []
+        out['log_prob'] = []
+
+    for batch in ds.iter_batches(batch_size, shuffle=False):
+        b = to_dev(batch, device)
+        if model_type == 'mdn':
+            pi, mu, sigma = model(b['cat'], b['cont'], b['tags'])
+            lp = mdn_log_prob(pi, mu, sigma, b['log_pp'])
+            out['pi_logits'].append(pi.cpu())
+            out['mu'].append(mu.cpu())
+            out['sigma'].append(sigma.cpu())
+            out['log_prob'].append(lp.cpu())
+        else:
+            logits = model(b['cat'], b['cont'], b['tags'])
+            probs = F.softmax(logits, dim=-1)
+            pp_int = b['pp'].long().clamp(0, num_bins - 1)
+            # log prob of the true bin: grab the predicted probability at the true price
+            lp = torch.log(probs.gather(1, pp_int.unsqueeze(1)).squeeze(1).clamp(min=1e-30))
+            out['probs'].append(probs.cpu())
+            out['log_prob'].append(lp.cpu())
+        out['log_pp'].append(b['log_pp'].cpu())
+        out['pp'].append(b['pp'].cpu())
+        out['bid'].append(b['bid'].cpu())
+
+    # concatenate all batches into single tensors
+    cat_outs = {}
+    for k, v in out.items():
+        cat_outs[k] = torch.cat(v, dim=0)
+    return cat_outs
 
 
-def plot_calibration_curve(mu, sigma, log_targets, model_name):
-    # calibration check: does the predicted p-th percentile actually contain p% of real prices?
-    # a well-calibrated model's 70th percentile prediction should contain roughly 70% of observed prices
-    from scipy.stats import norm
-
-    mu_np = mu.numpy()
-    sigma_np = sigma.numpy()
-    log_targets_np = log_targets.numpy()
-
-    empirical_coverages = []
-    for p in PERCENTILES:
-        # compute the p-th percentile of the predicted log-normal for each sample
-        predicted_pth = norm.ppf(p / 100, loc=mu_np, scale=sigma_np)
-        # what fraction of actual log prices fall below this predicted percentile
-        empirical_coverage = (log_targets_np <= predicted_pth).mean()
-        empirical_coverages.append(empirical_coverage * 100)
-
-    plt.figure(figsize=(6, 6))
-    plt.plot(PERCENTILES, empirical_coverages, "o-", label="Model", color="steelblue")
-    plt.plot([0, 100], [0, 100], "--", color="gray", label="Perfect calibration")
-    plt.xlabel("Predicted percentile")
-    plt.ylabel("Empirical coverage (%)")
-    plt.title(f"Calibration Curve -- {model_name}")
-    plt.legend()
-    plt.tight_layout()
-    path = os.path.join(PLOT_DIR, f"{model_name}_calibration.png")
-    plt.savefig(path, dpi=150)
-    plt.close()
-    print(f"saved {path}")
-
-    print(f"\ncalibration {model_name}")
-    for p, ec in zip(PERCENTILES, empirical_coverages):
-        diff = ec - p
-        print(f"predicted {p:2d}th percentile empirical {ec:.1f}% error={diff:+.1f}%")
-
-    return empirical_coverages
+def compute_pit_mdn(preds):
+    """PIT for MDN: CDF evaluated at the true value.
+    Should be uniform on [0,1] if model is well calibrated.
+    """
+    pi_logits = preds['pi_logits']
+    mu = preds['mu']
+    sigma = preds['sigma']
+    t = preds['log_pp']
+    pi = F.softmax(pi_logits, dim=-1)
+    z = (t.unsqueeze(1) - mu) / (sigma * math.sqrt(2.0))
+    comp = 0.5 * (1.0 + torch.erf(z))
+    cdf = (pi * comp).sum(dim=-1)
+    return cdf.numpy()
 
 
-def plot_bid_regret_comparison(transformer_regret, mlp_regret, naive_regret):
-    # the headline result: bid regret distribution for all three approaches
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4), sharey=False)
-    fig.suptitle("Bid Regret Distribution (lower is better)", fontsize=13)
-
-    for ax, regret, name, color in zip(
-        axes,
-        [transformer_regret, mlp_regret, naive_regret],
-        ["Transformer + NLL", "MLP + MSE", "Naive Average"],
-        ["steelblue", "darkorange", "gray"]
-    ):
-        regret_np = regret.numpy()
-        ax.hist(regret_np, bins=80, color=color, edgecolor="none", alpha=0.8)
-        ax.axvline(regret_np.mean(), color="red", linewidth=2, label=f"mean={regret_np.mean():.2f}")
-        ax.set_title(name)
-        ax.set_xlabel("Regret (CNY fen)")
-        ax.set_ylabel("Count")
-        ax.legend()
-
-    plt.tight_layout()
-    path = os.path.join(PLOT_DIR, "bid_regret_comparison.png")
-    plt.savefig(path, dpi=150)
-    plt.close()
-    print(f"saved {path}")
+def compute_pit_bins(preds):
+    """PIT for discrete bins: CDF at the true payprice bin."""
+    probs = preds['probs']
+    pp = preds['pp'].long()
+    cdf = torch.cumsum(probs, dim=1)
+    pit = cdf.gather(1, pp.unsqueeze(1).clamp(0, probs.size(1)-1)).squeeze(1)
+    return pit.numpy()
 
 
-def plot_bid_landscape(mu, sigma, log_targets, raw_targets, n_samples=3):
-    # visualize the predicted distribution vs actual price for a few test samples
-    # lets me see whether the uncertainty estimates look sensible
-    from scipy.stats import lognorm
-
-    fig, axes = plt.subplots(1, n_samples, figsize=(5 * n_samples, 4))
-    fig.suptitle("Predicted vs Empirical Bid Landscape (Sample Auctions)", fontsize=12)
-
-    indices = np.random.choice(len(mu), n_samples, replace=False)
-
-    for ax, idx in zip(axes, indices):
-        mu_val = mu[idx].item()
-        sigma_val = sigma[idx].item()
-        actual_price = raw_targets[idx].item()
-
-        # plot the predicted log-normal distribution
-        x = np.linspace(1, 300, 500)
-        pdf = lognorm.pdf(x, s=sigma_val, scale=np.exp(mu_val))
-        ax.plot(x, pdf, "b-", linewidth=2, label="Predicted dist")
-
-        # mark the actual clearing price
-        ax.axvline(actual_price, color="red", linewidth=2, linestyle="--", label=f"Actual={actual_price:.0f}")
-
-        # compute and mark the optimal bid
-        mu_t = torch.tensor([mu_val])
-        sigma_t = torch.tensor([sigma_val])
-        optimal_bid = compute_optimal_bid(mu_t, sigma_t)[0].item()
-        ax.axvline(optimal_bid, color="green", linewidth=2, linestyle="--", label=f"Optimal bid={optimal_bid:.0f}")
-
-        ax.set_xlabel("payprice (CNY fen)")
-        ax.set_ylabel("Density")
-        ax.set_title(f"Sample auction {idx}")
-        ax.legend(fontsize=8)
-
-    plt.tight_layout()
-    path = os.path.join(PLOT_DIR, "bid_landscape_samples.png")
-    plt.savefig(path, dpi=150)
-    plt.close()
-    print(f"saved {path}")
+def ks_statistic(pit):
+    """Kolmogorov-Smirnov statistic: max gap between empirical CDF of PIT
+    and the uniform CDF. Lower = better calibrated. Perfect model gives 0.
+    """
+    n = len(pit)
+    s = np.sort(pit)
+    cdf_emp = np.arange(1, n + 1) / n
+    d_plus = (cdf_emp - s).max()
+    d_minus = (s - (np.arange(0, n) / n)).max()
+    return float(max(d_plus, d_minus))
 
 
-def per_advertiser_ks_test(mu, sigma, log_targets, test_df):
-    # check the log-normal assumption per advertiser
-    # I'm curious if it holds better per-advertiser since each has different dynamics
-    print("\nper advertiser ks test")
-    advertisers = test_df["advertiser_id"].unique()
-
-    for adv in sorted(advertisers):
-        mask = torch.tensor(test_df["advertiser_id"].values == adv)
-        adv_log_targets = log_targets[mask].numpy()
-        adv_mu = mu[mask].numpy()
-        adv_sigma = sigma[mask].numpy()
-
-        # compare empirical log prices to a fitted normal
-        fitted_mu = adv_mu.mean()
-        fitted_sigma = adv_sigma.mean()
-        ks_stat, ks_pval = stats.kstest(adv_log_targets, "norm", args=(fitted_mu, fitted_sigma))
-        print(f"advertiser {adv} n={mask.sum():,} ks={ks_stat:.4f} p={ks_pval:.4f} {'reject' if ks_pval < 0.05 else 'cannot reject'}")
-
-def per_advertiser_bid_regret(transformer_bids, mlp_bids, naive_bids, raw_targets, test_df):
-    # break down bid regret per advertiser to see where each model wins and loses
-    print("\nper advertiser bid regret")
-    print(f"{'advertiser':<15} {'n':>8} {'transformer':>14} {'mlp':>10} {'naive':>10}")
-    print("-" * 60)
-
-    advertiser_col = test_df["advertiser_id"].values
-
-    for adv in sorted(test_df["advertiser_id"].unique()):
-        mask = torch.tensor(advertiser_col == adv)
-        t_regret = compute_bid_regret(transformer_bids[mask], raw_targets[mask]).mean().item()
-        m_regret = compute_bid_regret(mlp_bids[mask], raw_targets[mask]).mean().item()
-        n_regret = compute_bid_regret(naive_bids[mask], raw_targets[mask]).mean().item()
-        n = mask.sum().item()
-        print(f"{adv:<15} {n:>8,} {t_regret:>14.2f} {m_regret:>10.2f} {n_regret:>10.2f}")
+def coverage_table(pit, pcts):
+    """Fraction of PIT values below each percentile threshold."""
+    out = {}
+    for p in pcts:
+        out[p] = float((pit <= (p / 100.0)).mean())
+    return out
 
 
-def report_sigma_stats(sigma, test_df):
-    # sigma distribution on the test set -- useful for setting C++ circuit breaker thresholds
-    # if sigma is way outside these ranges at inference time something is probably broken
-    print("\nsigma distribution on test set")
-    sigma_np = sigma.numpy()
-    print(f"mean {sigma_np.mean():.4f}")
-    print(f"std {sigma_np.std():.4f}")
-    print(f"min {sigma_np.min():.6f}")
-    print(f"max {sigma_np.max():.4f}")
-    print(f"p5 {np.percentile(sigma_np, 5):.4f}")
-    print(f"p25 {np.percentile(sigma_np, 25):.4f}")
-    print(f"p50 {np.percentile(sigma_np, 50):.4f}")
-    print(f"p75 {np.percentile(sigma_np, 75):.4f}")
-    print(f"p95 {np.percentile(sigma_np, 95):.4f}")
-    print(f"fraction below 0.1 {(sigma_np < 0.1).mean()*100:.2f}%")
-    print(f"fraction above 2.0 {(sigma_np > 2.0).mean()*100:.2f}%")
-    print("\nc++ circuit breaker should flag sigma outside [0.05, 3.0]")
+def regret_metrics_mdn_grid(preds, V_value, n_candidates=500, b_max=300.0, batch_size=8192, device='cuda'):
+    """Grid search regret for MDN. V_value is a number or 'bidding'."""
+    pi = preds['pi_logits']
+    mu = preds['mu']
+    sigma = preds['sigma']
+    pp = preds['pp']
+    bid = preds['bid']
+
+    if isinstance(V_value, str) and V_value == 'bidding':
+        V = bid.clone()
+    else:
+        V = torch.full_like(pp, float(V_value))
+
+    bids = []
+    n = pi.shape[0]
+    for i in range(0, n, batch_size):
+        j = min(i + batch_size, n)
+        pi_b = pi[i:j].to(device)
+        mu_b = mu[i:j].to(device)
+        sigma_b = sigma[i:j].to(device)
+        V_b = V[i:j].to(device)
+        bb, _, _, _ = grid_optimize_mdn(pi_b, mu_b, sigma_b, V_b, n_candidates=n_candidates, b_max=b_max)
+        bids.append(bb.cpu())
+    bids = torch.cat(bids, dim=0)
+    reg = regret(bids, None, pp, V)
+    return reg, bids
 
 
-def print_summary(transformer_regret, mlp_regret, naive_regret, nll):
-    print("\nevaluation summary")
-    print(f"held-out nll transformer {nll:.4f}")
-    print(f"mean bid regret transformer {transformer_regret.mean().item():.4f} fen")
-    print(f"mean bid regret mlp baseline {mlp_regret.mean().item():.4f} fen")
-    print(f"mean bid regret naive {naive_regret.mean().item():.4f} fen")
+def regret_metrics_bins_grid(preds, V_value, batch_size=8192, device='cuda'):
+    """Same as regret_metrics_mdn_grid but for discrete bins model."""
+    probs = preds['probs']
+    pp = preds['pp']
+    bid = preds['bid']
+    if isinstance(V_value, str) and V_value == 'bidding':
+        V = bid.clone()
+    else:
+        V = torch.full_like(pp, float(V_value))
+    bids = []
+    n = probs.shape[0]
+    for i in range(0, n, batch_size):
+        j = min(i + batch_size, n)
+        p_b = probs[i:j].to(device)
+        V_b = V[i:j].to(device)
+        bb, _, _, _ = grid_optimize_bins(p_b, V_b)
+        bids.append(bb.cpu())
+    bids = torch.cat(bids, dim=0)
+    reg = regret(bids, None, pp, V)
+    return reg, bids
 
-    transformer_win_rate = (transformer_regret < mlp_regret).float().mean().item()
-    print(f"\ntransformer beats mlp on {transformer_win_rate*100:.1f}% of auctions")
+
+def regret_bins_newton(preds, V_value, batch_size=8192, device='cuda'):
+    """Regret using Newton optimizer for bins. Alternative to grid search."""
+    probs = preds['probs']
+    pp = preds['pp']
+    bid = preds['bid']
+    if isinstance(V_value, str) and V_value == 'bidding':
+        V = bid.clone()
+    else:
+        V = torch.full_like(pp, float(V_value))
+    bids = []
+    n = probs.shape[0]
+    for i in range(0, n, batch_size):
+        j = min(i + batch_size, n)
+        p_b = probs[i:j].to(device)
+        V_b = V[i:j].to(device)
+        bb, _ = newton_optimize_bins(p_b, V_b)
+        bids.append(bb.cpu())
+    bids = torch.cat(bids, dim=0)
+    return regret(bids, None, pp, V)
+
+
+def regret_metrics_mdn_newton(preds, V_value, batch_size=8192, device='cuda', b_max=300.0):
+    """Regret using Newton optimizer for MDN. Alternative to grid search."""
+    pi = preds['pi_logits']
+    mu = preds['mu']
+    sigma = preds['sigma']
+    pp = preds['pp']
+    bid = preds['bid']
+    if isinstance(V_value, str) and V_value == 'bidding':
+        V = bid.clone()
+    else:
+        V = torch.full_like(pp, float(V_value))
+    bids = []
+    n = pi.shape[0]
+    for i in range(0, n, batch_size):
+        j = min(i + batch_size, n)
+        pi_b = pi[i:j].to(device)
+        mu_b = mu[i:j].to(device)
+        sigma_b = sigma[i:j].to(device)
+        V_b = V[i:j].to(device)
+        bb, _ = newton_optimize_mdn(pi_b, mu_b, sigma_b, V_b, b_max=b_max)
+        bids.append(bb.cpu())
+    bids = torch.cat(bids, dim=0)
+    reg = regret(bids, None, pp, V)
+    return reg, bids
 
 
 def main():
-    os.makedirs(PLOT_DIR, exist_ok=True)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--ckpt', type=str, required=True)
+    parser.add_argument('--name', type=str, required=True)
+    parser.add_argument('--split', type=str, default='test', choices=['test', 'val'])
+    parser.add_argument('--save_preds', action='store_true')
+    args = parser.parse_args()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"device {device}")
+    cfg = load_config()
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    print("loading artifacts")
-    artifacts = load_artifacts()
+    art = load_artifacts(cfg['data']['processed_dir'])
+    parquet = os.path.join(cfg['data']['processed_dir'], f'{args.split}.parquet')
+    has_extras = (args.split == 'test')
+    ds = BidDataset(parquet, art, has_extras=has_extras)
+    print(f'{args.split} rows:', len(ds), flush=True)
 
-    print("loading test data")
-    test_loader = get_dataloader("data/processed/test.parquet", batch_size=BATCH_SIZE, shuffle=False)
-    test_df = pd.read_parquet(os.path.join(PROCESSED_DIR, "test.parquet"))
+    model, mcfg = load_model(args.ckpt, device)
+    model_type = mcfg['model_type']
+    num_bins = mcfg.get('num_bins')
+    print('model_type:', model_type, 'num_bins:', num_bins, flush=True)
 
-    # naive baseline uses the global log-normal mu from EDA -- avoids loading the 10M row train file
-    # from eda.py: global log-normal mu=4.0523 on training data
-    train_log_targets = torch.tensor([4.0523], dtype=torch.float32)
+    print('collecting predictions', flush=True)
+    t0 = time.time()
+    preds = collect_predictions(model, ds, device, model_type, batch_size=8192, num_bins=num_bins)
+    print('collected in', round(time.time()-t0,1), 's', flush=True)
 
-    # load both models
-    transformer = load_model(
-        BidTransformer,
-        os.path.join(CHECKPOINT_DIR, "BidTransformer_best.pt"),
-        artifacts,
-        device
-    )
-    mlp = load_model(
-        MLPBaseline,
-        os.path.join(CHECKPOINT_DIR, "MLPBaseline_best.pt"),
-        artifacts,
-        device
-    )
+    # density metrics: NLL and ANLP (average negative log probability)
+    # ANLP is the key density metric for comparing to published baselines
+    nll = float(-preds['log_prob'].mean())
+    if model_type == 'mdn':
+        # for MDN, ANLP subtracts log_payprice (Jacobian correction for log-space)
+        anlp = float(-(preds['log_prob'] - preds['log_pp']).mean())
+        pit = compute_pit_mdn(preds)
+    else:
+        anlp = float(-preds['log_prob'].mean())
+        pit = compute_pit_bins(preds)
 
-    # run inference
-    print("\nrunning transformer inference on test set")
-    mu, sigma, log_targets, raw_targets = run_transformer_inference(transformer, test_loader, device)
+    ks = ks_statistic(pit)
+    cov = coverage_table(pit, cfg['evaluation']['percentiles'])
+    print(f'NLL: {nll:.4f}')
+    print(f'ANLP_linear: {anlp:.4f}')
+    print(f'KS: {ks:.4f}')
+    print('coverage:')
+    for p in sorted(cov.keys()):
+        print(f'pct {p}: {cov[p]:.3f}')
 
-    print("running mlp inference on test set")
-    mlp_preds, _, _ = run_mlp_inference(mlp, test_loader, device)
+    print('regret V=150 (grid)')
+    if model_type == 'mdn':
+        reg150, bids150 = regret_metrics_mdn_grid(preds, 150.0, device=device)
+    else:
+        reg150, bids150 = regret_metrics_bins_grid(preds, 150.0, device=device)
+    print(f'mean regret: {reg150.mean().item():.3f} fen')
 
-    # held-out NLL
-    nll = compute_held_out_nll(mu, sigma, log_targets)
-    print(f"\nheld-out nll {nll:.4f}")
+    print('regret V=bidding_price (grid)')
+    if model_type == 'mdn':
+        reg_bid, bids_bid = regret_metrics_mdn_grid(preds, 'bidding', device=device)
+    else:
+        reg_bid, bids_bid = regret_metrics_bins_grid(preds, 'bidding', device=device)
+    print(f'mean regret: {reg_bid.mean().item():.3f} fen')
 
-    # calibration curve
-    print("\ncomputing calibration curve")
-    plot_calibration_curve(mu, sigma, log_targets, "BidTransformer")
+    if model_type == 'mdn':
+        print('regret V=150 (newton)')
+        reg_n150, _ = regret_metrics_mdn_newton(preds, 150.0, device=device)
+        print(f'mean regret: {reg_n150.mean().item():.3f}')
+        print('regret V=bidding (newton)')
+        reg_nbid, _ = regret_metrics_mdn_newton(preds, 'bidding', device=device)
+        print(f'mean regret: {reg_nbid.mean().item():.3f}')
+    else:
+        print('regret V=150 (newton-bins)')
+        reg_n150 = regret_bins_newton(preds, 150.0, device=device)
+        print(f'mean regret: {reg_n150.mean().item():.3f}')
+        print('regret V=bidding (newton-bins)')
+        reg_nbid = regret_bins_newton(preds, 'bidding', device=device)
+        print(f'mean regret: {reg_nbid.mean().item():.3f}')
 
-    # compute optimal bids for all three approaches
-    print("\ncomputing optimal bids")
-    transformer_bids = compute_optimal_bid(mu, sigma)
+    adv_arr = np.asarray(ds.adv)
+    advs = sorted(set(adv_arr.tolist()))
+    per_adv = {}
+    print('per-advertiser regret (V=150 grid):')
+    for a in advs:
+        m = adv_arr == a
+        if m.sum() == 0:
+            continue
+        r = reg150[m].mean().item()
+        per_adv[a] = r
+        print(f'adv {a}: n={int(m.sum())}, regret={r:.3f}')
 
-    # MLP bids -- point estimate only, so I use predicted log price as mu with a fixed sigma
-    # since MLP has no sigma, I use the global sigma from training as a stand-in
-    global_sigma = sigma.mean()
-    mlp_bids = compute_optimal_bid(mlp_preds, torch.full_like(mlp_preds, global_sigma.item()))
+    out_dir = os.path.join('exports', args.name)
+    os.makedirs(out_dir, exist_ok=True)
+    res = {
+        'nll': nll,
+        'anlp': anlp,
+        'ks': ks,
+        'coverage': cov,
+        'regret_v150_grid': float(reg150.mean()),
+        'regret_vbid_grid': float(reg_bid.mean()),
+        'per_adv_regret_v150': per_adv,
+    }
+    res['regret_v150_newton'] = float(reg_n150.mean())
+    res['regret_vbid_newton'] = float(reg_nbid.mean())
+    with open(os.path.join(out_dir, f'eval_{args.split}.pkl'), 'wb') as f:
+        pickle.dump(res, f)
 
-    # naive bid -- historical average clearing price
-    naive_bid_value = compute_naive_bid(train_log_targets)
-    naive_bids = torch.full((len(raw_targets),), naive_bid_value)
-    print(f"naive bid value {naive_bid_value:.2f} fen")
-
-    # compute bid regret for all three
-    transformer_regret = compute_bid_regret(transformer_bids, raw_targets)
-    mlp_regret = compute_bid_regret(mlp_bids, raw_targets)
-    naive_regret = compute_bid_regret(naive_bids, raw_targets)
-
-    # plots
-    print("\ngenerating plots")
-    plot_bid_regret_comparison(transformer_regret, mlp_regret, naive_regret)
-    plot_bid_landscape(mu, sigma, log_targets, raw_targets)
-
-    # per-advertiser KS test
-    per_advertiser_ks_test(mu, sigma, log_targets, test_df)
-
-    # summary
-    print_summary(transformer_regret, mlp_regret, naive_regret, nll)
-
-    per_advertiser_bid_regret(transformer_bids, mlp_bids, naive_bids, raw_targets, test_df)
-    report_sigma_stats(sigma, test_df)
-
-    print("\nevaluation done plots saved to results/plots/")
+    if args.save_preds:
+        save_path = os.path.join(out_dir, f'preds_{args.split}.pt')
+        light = {
+            'log_pp': preds['log_pp'],
+            'pp': preds['pp'],
+            'bid': preds['bid'],
+            'log_prob': preds['log_prob'],
+            'pit': torch.from_numpy(pit),
+            'adv': adv_arr,
+        }
+        if model_type == 'mdn':
+            light['pi_logits'] = preds['pi_logits']
+            light['mu'] = preds['mu']
+            light['sigma'] = preds['sigma']
+        else:
+            light['probs'] = preds['probs']
+        if has_extras:
+            light['click'] = ds.click
+            light['conv'] = ds.conv
+        torch.save(light, save_path)
+        print('saved preds to', save_path)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
