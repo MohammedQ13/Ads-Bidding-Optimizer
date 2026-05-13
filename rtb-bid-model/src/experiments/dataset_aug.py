@@ -1,3 +1,7 @@
+"""BidDatasetAug: adds bidding_price (raw and log) as input features.
+
+Same parquet, different cont_arr layout. Model expects num_continuous = 11.
+"""
 import os
 import pickle
 import numpy as np
@@ -6,67 +10,57 @@ import torch
 
 
 def load_artifacts(processed_dir):
-    """Load the preprocessing artifacts (encoders, scalers, vocab) saved by features.py."""
     with open(os.path.join(processed_dir, 'artifacts.pkl'), 'rb') as f:
         return pickle.load(f)
 
 
-class BidDataset:
-    """Loads a processed parquet file into CPU tensors for training/evaluation.
-    All data lives in RAM as tensors. iter_batches yields dict batches.
-    """
+class BidDatasetAug:
 
-    def __init__(self, parquet_path, artifacts, has_extras=False):
+    def __init__(self, parquet_path, artifacts, has_extras=False, bp_mean=None, bp_std=None,
+                 lp_bp_mean=None, lp_bp_std=None):
         df = pd.read_parquet(parquet_path)
         self.cat_features = artifacts['categorical_features']
         self.has_extras = has_extras
-
-        # three kinds of continuous features:
-        # standardized (mean/std), binary (0/1), and cyclical (sin/cos encoded)
         self.cont_cols = ['log_floor_price', 'slot_area', 'tag_count']
         self.bin_cols = ['has_floor_price', 'is_weekend']
         self.cyc_cols = ['hour_sin', 'hour_cos', 'weekday_sin', 'weekday_cos']
 
-        # pack categorical features into a single int array (B, num_cat_features)
         n = len(df)
         cat_arr = np.zeros((n, len(self.cat_features)), dtype=np.int64)
         for i, feat in enumerate(self.cat_features):
             cat_arr[:, i] = df[feat + '_idx'].values.astype(np.int64)
 
-        # pack all continuous features into a single float array (B, 9)
-        ncont = len(self.cont_cols) + len(self.bin_cols) + len(self.cyc_cols)
+        ncont = len(self.cont_cols) + len(self.bin_cols) + len(self.cyc_cols) + 2  # +2 for bp/log_bp
         cont_arr = np.zeros((n, ncont), dtype=np.float32)
         col = 0
         for c in self.cont_cols:
-            cont_arr[:, col] = df[c].values.astype(np.float32)
-            col += 1
+            cont_arr[:, col] = df[c].values.astype(np.float32); col += 1
         for c in self.bin_cols:
-            cont_arr[:, col] = df[c].values.astype(np.float32)
-            col += 1
+            cont_arr[:, col] = df[c].values.astype(np.float32); col += 1
         for c in self.cyc_cols:
-            cont_arr[:, col] = df[c].values.astype(np.float32)
-            col += 1
+            cont_arr[:, col] = df[c].values.astype(np.float32); col += 1
+        bp = df['bidding_price'].values.astype(np.float32)
+        lp_bp = np.log(np.clip(bp, 1.0, None)).astype(np.float32)
+        if bp_mean is None:
+            bp_mean = float(bp.mean()); bp_std = float(bp.std()) if bp.std() > 1e-6 else 1.0
+            lp_bp_mean = float(lp_bp.mean()); lp_bp_std = float(lp_bp.std()) if lp_bp.std() > 1e-6 else 1.0
+        cont_arr[:, col] = ((bp - bp_mean) / bp_std); col += 1
+        cont_arr[:, col] = ((lp_bp - lp_bp_mean) / lp_bp_std); col += 1
+        self.bp_mean = bp_mean; self.bp_std = bp_std
+        self.lp_bp_mean = lp_bp_mean; self.lp_bp_std = lp_bp_std
 
-        # user tags: each row has up to 10 tag IDs, padded with 0
         tags = df['tag_indices'].values
         tag_arr = np.zeros((n, 10), dtype=np.int64)
-        # try to stack all rows at once (fast path)
         try:
             stacked = np.array(list(tags), dtype=np.int64)
             if stacked.shape == (n, 10):
                 tag_arr = stacked
-            else:
-                for i in range(n):
-                    row = tags[i]
-                    for j in range(min(10, len(row))):
-                        tag_arr[i, j] = int(row[j])
         except Exception:
             for i in range(n):
                 row = tags[i]
                 for j in range(min(10, len(row))):
                     tag_arr[i, j] = int(row[j])
 
-        # convert everything to torch tensors and keep in RAM
         self.cat = torch.from_numpy(cat_arr)
         self.cont = torch.from_numpy(cont_arr)
         self.tags = torch.from_numpy(tag_arr)
@@ -75,10 +69,8 @@ class BidDataset:
         self.bid = torch.from_numpy(df['bidding_price'].values.astype(np.float32))
         self.adv = df['advertiser_id'].values.astype(str)
         if has_extras:
-            # test file has click and conversion labels appended
             self.click = torch.from_numpy(df['click'].values.astype(np.int64))
             self.conv = torch.from_numpy(df['conversion'].values.astype(np.int64))
-
         self.n = n
 
     def num_continuous(self):
@@ -88,12 +80,8 @@ class BidDataset:
         return self.n
 
     def iter_batches(self, batch_size, shuffle=False, drop_last=False, generator=None):
-        """Yield batches as dicts of tensors. Shuffles indices, not data copies."""
         if shuffle:
-            if generator is not None:
-                perm = torch.randperm(self.n, generator=generator)
-            else:
-                perm = torch.randperm(self.n)
+            perm = torch.randperm(self.n, generator=generator) if generator is not None else torch.randperm(self.n)
         else:
             perm = torch.arange(self.n)
         cur = 0
@@ -115,7 +103,6 @@ class BidDataset:
             cur = end
 
     def num_batches(self, batch_size, drop_last=False):
-        """How many batches per epoch."""
         if drop_last:
             return self.n // batch_size
         return (self.n + batch_size - 1) // batch_size

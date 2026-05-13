@@ -2,49 +2,82 @@ data:
   raw_dir: data/raw
   processed_dir: data/processed
   target_col: payprice
-  train_frac: 0.70
-  val_frac: 0.15
-  test_frac: 0.15
+  train_frac: 0.85
+  train_files:
+    - data/raw/training2nd/imp.20130606.txt.bz2
+    - data/raw/training2nd/imp.20130607.txt.bz2
+    - data/raw/training2nd/imp.20130608.txt.bz2
+    - data/raw/training2nd/imp.20130609.txt.bz2
+    - data/raw/training2nd/imp.20130610.txt.bz2
+    - data/raw/training2nd/imp.20130611.txt.bz2
+    - data/raw/training2nd/imp.20130612.txt.bz2
+  test_files:
+    - data/raw/testing2nd/leaderboard.test.data.20130613_15.txt.bz2
 
 features:
   categorical:
-    - weekday
-    - hour
     - region
     - city
-    - adexchange
-    - slotformat
-    - slotvisibility
-    - useragent
+    - domain
+    - ad_exchange
+    - slot_width
+    - slot_height
+    - slot_visibility
+    - slot_format
+    - advertiser_id
+  embedding_dims:
+    region: 16
+    city: 24
+    domain: 32
+    ad_exchange: 4
+    slot_width: 8
+    slot_height: 6
+    slot_visibility: 4
+    slot_format: 4
+    advertiser_id: 6
+    user_tags: 24
+  clip_min_count:
+    city: 500
+    domain: 100
   continuous:
-    - slotwidth
-    - slotheight
-    - slotprice
-  embedding_dim: 16
-  time_encoding: sincos
+    - has_floor_price
+    - log_floor_price
+    - slot_area
+    - tag_count
+  cyclical:
+    - hour_sin
+    - hour_cos
+    - weekday_sin
+    - weekday_cos
+  binary:
+    - is_weekend
 
-model:
-  hidden_dim: 128
-  num_heads: 4
-  num_layers: 3
-  ffn_dim: 256
+mdn:
+  hidden_layers: [512, 256, 128, 64]
+  n_components: 6
+  dropout: 0.02
+  sigma_floor: 0.05
+
+bins:
+  num_bins: 200
+  hidden_layers: [512, 256, 128, 64]
   dropout: 0.1
+  price_min: 0
+  price_max: 300
 
 training:
-  batch_size: 1024
-  max_epochs: 50
-  learning_rate: 3.0e-4
-  weight_decay: 1.0e-5
-  early_stopping_patience: 5
+  batch_size: 8192
+  max_epochs: 12
+  learning_rate: 1.0e-3
+  weight_decay: 5.0e-4
+  early_stopping_patience: 3
   grad_clip: 1.0
+  warmup_steps: 500
+  ema_decay: 0.99
   seed: 42
+  num_workers: 4
 
 evaluation:
-  percentiles: [10, 20, 30, 40, 50, 60, 70, 80, 90]
-  impression_value: 1.50
-  bid_shading_fallback: 0.70
-
-export:
-  onnx_path: exports/bid_model.onnx
-  opset_version: 17
-  validation_samples: 1000
+  percentiles: [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95]
+  impression_value: 150.0
+  bid_candidates: 500

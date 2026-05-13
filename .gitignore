@@ -1,0 +1,37 @@
+# Data and model artifacts
+rtb-bid-model/data/
+rtb-bid-model/exports/
+rtb-bid-model/logs/
+rtb-bid-model/results/
+
+# Model and data files (safety net)
+*.onnx
+*.pt
+*.pkl
+*.bz2
+*.parquet
+
+# Build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Environment
+.env
+.venv
+env/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project
+*.tar.gz
+notes.txt
+config.txt
+
