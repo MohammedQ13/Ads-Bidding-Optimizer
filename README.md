@@ -16,6 +16,27 @@ dark, it falls back to a recorded run of real data.
 
 ![RTB Control Plane live telemetry console](dashboard/demo.gif)
 
+## Highlights
+
+- **~965,000 bids/sec** of raw inference throughput on one 16-vCPU node
+  (~1.0us per bid): feature encode + ONNX model + first-price bid optimization.
+  The model is never the bottleneck.
+- **~56,000 req/s per node end to end over gRPC at p99 2.4ms** (peak ~79k),
+  comfortably inside a 10ms auction deadline. Stateless, so it scales linearly:
+  ~10 nodes ~= ~790k req/s behind a load balancer.
+- **19.908 fen regret** per impression (profit left on the table vs a perfect
+  oracle), about 72% of the maximum achievable profit. For comparison: a naive
+  fixed bid scores 28.74 and a point-estimate regression scores 37.13 (worse
+  than naive), which is the whole reason this predicts a full distribution.
+- **Density estimation that beats published research:** ANLP 3.74 vs the DLF
+  model from KDD 2019 at 4.774 on iPinYou (indirect comparison, different
+  splits, but a strong result).
+- **Zero-downtime online learning:** a retrainer fine-tunes on live auction
+  outcomes and the C++ fleet hot-swaps the new model with an atomic pointer
+  swap, no dropped requests.
+- **Trained on 10.4M real impressions** (iPinYou Season 2), served by a 301-bin
+  model whose softmax is baked into the ONNX graph.
+
 This is a three-layer distributed system, all in this repo:
 1. **Python ML model** (`rtb-bid-model/`): trains on iPinYou data, exports ONNX
 2. **C++ inference fleet** (`cpp-bidder/`): loads ONNX, serves bids over gRPC
