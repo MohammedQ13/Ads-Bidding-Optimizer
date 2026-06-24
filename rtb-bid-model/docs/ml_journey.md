@@ -1,4 +1,4 @@
-# ML Model Development -- Full Journey
+# ML Model Development: Full Journey
 
 ## The Problem
 
@@ -23,7 +23,7 @@ iPinYou Season 2 (June 2013). Real RTB impression logs from a Chinese DSP.
 - Test: 3 days (June 13-15), 2.5M rows (leaderboard set)
 - Target: payprice (clearing price in fen, 1 fen = 0.01 CNY)
 
-The temporal split is critical -- training on earlier days, testing on
+The temporal split is critical: training on earlier days, testing on
 later days. This prevents look-ahead bias but introduces a distribution
 shift (test mean log price = 4.155 vs train = 4.046).
 
@@ -53,8 +53,6 @@ Primary metric: regret at V=150 (fixed impression value).
 Secondary: regret at V=bidding_price (per-impression value from the DSP's
 original bid, ~227-300 fen).
 
----
-
 ## v1: BidTransformer (abandoned)
 
 Architecture: Transformer encoder (3 layers, 4 heads, FFN dim 256) on
@@ -62,7 +60,7 @@ tabular features. Output: 2 neurons (mu, sigma for log-normal distribution).
 
 Problems:
 - Sigma collapsed to zero or exploded, causing NaN losses
-- Self-attention has no benefit for tabular data -- features have no
+- Self-attention has no benefit for tabular data, features have no
   natural ordering, so it was just an expensive MLP
 - Single log-normal assumption too rigid for multimodal price distributions
 - Convergence was fragile, very sensitive to learning rate
@@ -73,8 +71,6 @@ slot area) survived into v2.
 
 Artifacts: BidTransformer_best.pt and MLPBaseline_best.pt were in
 exports/ but have been deleted as dead weight.
-
----
 
 ## v2: Deep MLP + MDN + Discrete Bins
 
@@ -98,8 +94,6 @@ Training: AdamW optimizer, cosine LR schedule with linear warmup, AMP
 (float16), exponential moving average (EMA) of weights, early stopping
 on validation loss. Best of raw vs EMA weights saved per epoch.
 
----
-
 ## Round 1: Google Cloud T4 (May 7-8, 2026)
 
 Instance: us-central1-a, T4 GPU. First cloud training run.
@@ -118,15 +112,13 @@ Results:
 Key findings:
 - Ensembling improved NLL by 10.9% but regret only by 0.6%
 - v8 was over-confident at median (+5.6%), v10 under-confident (-13.9%)
-  -- complementary errors made the ensemble work
-- Better calibration does NOT mean better bidding -- the bid optimizer
+  - complementary errors made the ensemble work
+- Better calibration does NOT mean better bidding. The bid optimizer
   needs sharp peaks, not smooth well-calibrated distributions
 
 What went wrong: the instance was deleted before pulling checkpoints and
 code. Everything lost except a notes.txt with the numbers. Lesson
 learned: always pull results before deleting cloud instances.
-
----
 
 ## Round 2: Google Cloud L4 (May 8, 2026)
 
@@ -160,7 +152,7 @@ into smooth Gaussian shapes.
 ### Direction 3: LightGBM quantile (abandoned this round)
 
 Started training with full defaults (255 leaves, 400 rounds). Way too
-slow -- ~18 min per quantile on 10M rows while sharing CPU with GPU
+slow - ~18 min per quantile on 10M rows while sharing CPU with GPU
 training. Killed after 2 quantiles. Revisited in Round 3.
 
 ### Direction 4: Newton bid optimizer
@@ -192,7 +184,7 @@ lambda sweep was not attempted due to time.
 
 mdn_s42 (K=12, dropout=0.05, batch=8192, lr=1e-3): regret = 33.13.
 Terrible compared to bins (20.33). The MDN overfit dramatically after
-epoch 0 -- train loss dropped to -0.08 while val NLL rose from 0.64 to
+epoch 0 - train loss dropped to -0.08 while val NLL rose from 0.64 to
 1.5+. Sigma collapsed on training data, failed to generalize.
 
 Attempts to fix with stronger regularization (dropout=0.3, target
@@ -211,8 +203,6 @@ misplaced). The bins model is accurate but spread out. Blending gives
 accuracy AND sharpness, which helps the bid optimizer make decisive bids.
 
 Round 2 best: 19.991 fen (5% better than Round 1's 21.02).
-
----
 
 ## Round 3: Focused Improvements (May 10, 2026)
 
@@ -244,17 +234,17 @@ Results:
     Naive (bid mean payprice):     regret = 28.74
 
 Why LightGBM didn't win:
-1. No user tags -- LightGBM can't handle variable-length multi-hot
+1. No user tags. LightGBM can't handle variable-length multi-hot
    features. The neural models use tag embeddings which trees cannot.
 2. 14 quantile points give a much coarser CDF than 200-300 bins.
    ANLP 6.77 vs bins 3.60 reflects this.
-3. Each quantile is a separate model -- slow to train and predict.
+3. Each quantile is a separate model, slow to train and predict.
 
 Why LightGBM regression was worse than naive: a point estimate cannot
 optimize first-price bids. Bidding the predicted average overpays on
 cheap auctions and loses expensive ones. You NEED the full distribution
 to compute (V-b)*CDF(b). This is the single most important finding of
-the project -- distributional prediction is not optional.
+the project: distributional prediction is not optional.
 
 LightGBM's role: interpretable fallback. 21.84 is only 1.67 fen behind
 the best neural single model, with no GPU required.
@@ -288,8 +278,6 @@ Tested at budget fractions 1/32, 1/8, 1/2, and 1x of oracle cost.
 Exported best bins model to ONNX (opset 17) with softmax baked into the
 graph. Verified numerical match with onnxruntime (max abs diff 4.5e-7).
 Generated feature_config.json for the C++ server.
-
----
 
 ## Round 4: Exhaustive Optimization (May 10, 2026)
 
@@ -366,8 +354,6 @@ Best ensemble: ens_v4_compact
 The "bad" MDN (mdn_s42, 33.13 alone) gets the highest weight. Its sharp
 misaligned peaks complement the accurate-but-diffuse bins predictions.
 
----
-
 ## Why We Stopped
 
 The last 5 ensemble attempts all landed in [19.908, 20.001]:
@@ -382,21 +368,19 @@ The last 5 ensemble attempts all landed in [19.908, 20.001]:
    Greedy weight search cannot find a combination below 19.9.
 
 4. Architecture changes all lose: wider, deeper, different K, longer
-   training -- nothing helps.
+   training, nothing helps.
 
 5. The temporal split is the ceiling. Train days 6/06-6/12, test days
    6/13-6/15 introduces a mean shift that no model can erase. What
    would break the ceiling: more training data or a non-temporal split.
    Both are out of scope.
 
----
-
 ## Final Results
 
 | Model | Regret V=150 | ANLP | KS |
 |---|---|---|---|
-| Naive (bid mean payprice 78.19) | 28.74 | -- | -- |
-| LightGBM MAE regression | 37.13 | -- | -- |
+| Naive (bid mean payprice 78.19) | 28.74 | - | - |
+| LightGBM MAE regression | 37.13 | - | - |
 | LightGBM 14-quantile | 21.84 | 6.77 | 0.20 |
 | MDN K=6 dp=0.02 (best single MDN) | 21.21 | 4.52 | 0.21 |
 | MDN K=12 dp=0.05 (Round 2, overfit) | 33.13 | 4.98 | 0.25 |
@@ -413,8 +397,6 @@ Per-advertiser regret (V=150, best ensemble):
 | 3386 | 545,421 | 19.27 |
 | 3427 | 536,795 | 18.78 |
 | 3476 | 523,848 | 20.40 |
-
----
 
 ## Comparison to Published Work
 
@@ -441,7 +423,7 @@ predicts the true clearing price distribution. Lower is better.
 | **Our bins quantile 200** | **3.74** | this project |
 
 Our bins models beat DLF's published ANLP=4.774. The density estimation
-is strong -- our predicted distributions fit the true clearing prices
+is strong: our predicted distributions fit the true clearing prices
 better than published SOTA.
 
 Caveats: DLF used different train/test splits, different feature
@@ -479,7 +461,7 @@ The remaining 28% gap comes from:
 2. **Fixed V=150**: real DSPs compute V = P(click) * value_per_click
    per auction. With fixed V, the model bids the same "aggressiveness"
    for every impression regardless of its actual value. Some impressions
-   are worth 300 fen, others 50 -- we treat them all the same.
+   are worth 300 fen, others 50 - we treat them all the same.
 
 3. **Selection bias**: we only see auctions iPinYou won. The right tail
    of the clearing price distribution (expensive auctions they lost) is
@@ -498,7 +480,7 @@ We explored V=bidding_price (the DSP's actual bid per impression,
 
 1. Newton optimizer diverged badly at high V (regret >62 vs grid's 48).
    Multi-modal CDFs have spurious roots when V is large.
-2. bidding_price is linearly scaled by iPinYou before release -- it's
+2. bidding_price is linearly scaled by iPinYou before release, it's
    not the true per-impression valuation.
 3. Grid search worked with V=bid but the absolute regret numbers are
    just higher because V is higher. It didn't improve relative
@@ -532,11 +514,9 @@ The closed-loop simulation in Phase 3 addresses every limitation:
 5. **Sliding window retraining**: the model retrains on a sliding
    window of recent simulation outcomes (e.g. last 500K auctions).
    Oldest data drops out as new data arrives, preventing synthetic
-   accumulation. The iPinYou-trained model is the warm start -- it
+   accumulation. The iPinYou-trained model is the warm start that
    provides real auction priors. New ONNX models are loaded via atomic
    pointer swap in the C++ servers (zero downtime).
-
----
 
 ## Key Lessons
 
@@ -567,8 +547,6 @@ The closed-loop simulation in Phase 3 addresses every limitation:
 8. The temporal split is the ceiling. Train/test distribution shift
    limits what any model can achieve on this dataset.
 
----
-
 ## Current State
 
 What's done:
@@ -577,17 +555,25 @@ What's done:
 - ONNX export verified (bins_300, max diff 4.5e-7 vs PyTorch)
 - Full experiment documentation in RESULTS.md and experiments.md
 
-What needs doing before Phase 2:
-- Re-export ONNX as bins_quant200 (gains 0.16 fen, needs bin edges in
-  feature_config.json so C++ server knows the price mapping)
+Deployment choice (Phase 2 onward):
+- The deployed model is the uniform bins_300 (301 bins, bin index = price
+  in fen), not bins_quant200. A backtest caught that bins_quant200 is
+  quantile-spaced: its bin index is not the price, it maps through an edges
+  array that was never exported. The C++ server and the rest of the pipeline
+  assume bin index equals price, which is only correct for uniform bins, so
+  deploying quant200 as-is produced wrong bids (regret around 30). Keeping
+  the uniform bins_300 makes that assumption correct with no code change, at
+  a cost of 0.16 fen. See the Model Deployment Decision section in
+  build_plan.md.
 
 Known issues (documented, intentionally not fixed):
 - Code duplication in experiment scripts (moved to src/experiments/,
   won't be touched again)
 - Newton optimizer broken for V=bid (abandoned, grid is canonical)
 - 5 LightGBM upper quantiles not trained (conclusion already reached)
-
----
+- Shipping bins_quant200 (the 0.16-fen-better single model) would need its
+  bin edges exported plus an edge-aware bid optimizer; neither was built,
+  and the gain is not worth it for the live system
 
 ## Reproduction
 
@@ -617,37 +603,37 @@ Known issues (documented, intentionally not fixed):
 ## File Structure
 
     rtb-bid-model/
-      config.yaml              -- full config with mdn/bins/training sections
-      requirements.txt         -- Python dependencies
+      config.yaml              - full config with mdn/bins/training sections
+      requirements.txt         - Python dependencies
       src/
-        config.py              -- loads config.yaml
-        features.py            -- raw data -> processed parquets
-        dataset.py             -- loads parquets into memory
-        model.py               -- MDN + DiscreteBins architectures
-        loss.py                -- NLL losses (MDN, bins, smoothed)
-        train.py               -- training loop (AMP, EMA, early stopping)
-        evaluate.py            -- full evaluation pipeline
-        bid_optimizer.py       -- grid + Newton bid optimization
-        export_onnx.py         -- ONNX export for Phase 2
-        experiments/           -- one-off cloud experiment scripts (23 py + 7 sh)
+        config.py              - loads config.yaml
+        features.py            - raw data -> processed parquets
+        dataset.py             - loads parquets into memory
+        model.py               - MDN + DiscreteBins architectures
+        loss.py                - NLL losses (MDN, bins, smoothed)
+        train.py               - training loop (AMP, EMA, early stopping)
+        evaluate.py            - full evaluation pipeline
+        bid_optimizer.py       - grid + Newton bid optimization
+        export_onnx.py         - ONNX export for Phase 2
+        experiments/           - one-off cloud experiment scripts (23 py + 7 sh)
       docs/
-        RESULTS.md             -- final results summary
-        experiments.md         -- detailed experiment log (all rounds)
-        ml_journey.md          -- this file
-        model.md               -- architecture details
-        data.md                -- dataset and feature engineering documentation
-        pipeline.md            -- training, evaluation, and ONNX export pipeline
-        future.md              -- known limitations and planned improvements
-        build_plan.md          -- Phase 2/3 build plan
-        infrastructure.md      -- infrastructure stack design
-      exports/                 -- not in git
-        best_model.onnx        -- bins_300 ONNX (verified)
-        feature_config.json    -- feature encoding spec for C++ server
-        bins_*/                -- bins model checkpoints
-        mdn_*/                 -- MDN checkpoints
-        ensembles/             -- ensemble evaluation pickles
-        preds_eval/            -- single-model evaluation pickles
-        budget/                -- budget simulation pickles
-        lgbm_quant/            -- LightGBM models
-      data/processed/          -- train/val/test parquets + artifacts.pkl (not in git)
-      results/plots/           -- diagnostic plots (not in git)
+        RESULTS.md             - final results summary
+        experiments.md         - detailed experiment log (all rounds)
+        ml_journey.md          - this file
+        model.md               - architecture details
+        data.md                - dataset and feature engineering documentation
+        pipeline.md            - training, evaluation, and ONNX export pipeline
+        future.md              - known limitations and planned improvements
+        build_plan.md          - Phase 2/3 build plan
+        infrastructure.md      - infrastructure stack design
+      exports/                 - not in git
+        best_model.onnx        - bins_300 ONNX (verified)
+        feature_config.json    - feature encoding spec for C++ server
+        bins_*/                - bins model checkpoints
+        mdn_*/                 - MDN checkpoints
+        ensembles/             - ensemble evaluation pickles
+        preds_eval/            - single-model evaluation pickles
+        budget/                - budget simulation pickles
+        lgbm_quant/            - LightGBM models
+      data/processed/          - train/val/test parquets + artifacts.pkl (not in git)
+      results/plots/           - diagnostic plots (not in git)

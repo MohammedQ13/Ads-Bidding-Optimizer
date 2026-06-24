@@ -1,0 +1,29 @@
+# Focused image to compile and run the hot-path parity test. No gRPC here, just
+# ONNX Runtime + nlohmann/json, so it builds fast while we get feature encoding
+# and the bid optimizer matching Python.
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    wget \
+    ca-certificates \
+    nlohmann-json3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG ORT_VERSION=1.18.0
+RUN wget -q https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz \
+    && tar -xzf onnxruntime-linux-x64-${ORT_VERSION}.tgz -C /opt \
+    && mv /opt/onnxruntime-linux-x64-${ORT_VERSION} /opt/onnxruntime \
+    && rm onnxruntime-linux-x64-${ORT_VERSION}.tgz
+
+WORKDIR /app
+COPY . .
+
+RUN g++ -std=c++17 -O2 -I/opt/onnxruntime/include -Isrc \
+    test/parity_test.cpp src/feature_store.cpp src/model_session.cpp src/bid_optimizer.cpp \
+    -L/opt/onnxruntime/lib -lonnxruntime -o parity_test
+
+ENV LD_LIBRARY_PATH=/opt/onnxruntime/lib
+RUN ./parity_test

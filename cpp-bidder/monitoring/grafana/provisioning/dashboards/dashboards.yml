@@ -1,0 +1,11 @@
+# Tells Grafana to load any dashboard JSON dropped in the dashboards folder.
+apiVersion: 1
+providers:
+  - name: "bidder"
+    orgId: 1
+    folder: ""
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /etc/grafana/provisioning/dashboards

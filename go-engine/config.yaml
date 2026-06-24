@@ -1,0 +1,37 @@
+# Auction engine config. Companies are the C++ bid servers; inside the compose
+# network they are reachable by service name on their gRPC port 50051.
+companies:
+  - id: company-a
+    address: "company-a:50051"
+  - id: company-b
+    address: "company-b:50051"
+  - id: company-c
+    address: "company-c:50051"
+  - id: company-d
+    address: "company-d:50051"
+    budget: 6000           # half the shared budget: D is the budget-paced strategy,
+                           # so it spends its share early and sits out the rest of
+                           # the day - distinct from A even though both bid 1.0x
+
+auction:
+  rate_per_sec: 200       # auctions per second (0 = as fast as possible)
+  deadline_ms: 10         # a company that bids late is excluded
+  impression_value: 150   # V, what each impression is worth (held constant)
+  daily_budget: 12000     # per-company budget in fen (binding, so pacing matters)
+  day_auctions: 1000      # auctions per simulated day; budgets reset each day
+
+competitors:
+  count: 8                # synthetic competitors per auction (a fuller market)
+  base_median: 50         # median market price in fen (sets how hard it is to win)
+  spread: 0.5             # lognormal sigma (how spread out competitor bids are)
+
+# the engine serves the live telemetry here: /stats (JSON) and /events (SSE)
+metrics_port: 9200
+outcome_log: "/data/outcomes.jsonl"
+
+# collector settings: scrape each company's Prometheus /metrics for its internals
+# (circuit breaker, queue depth, cache hits, model version) and read the JSON the
+# retrainer writes each round, both folded into /stats. metrics_address defaults
+# to the company host on port 9100 if not set per company above.
+scrape_metrics: true
+retrainer_status: "/models/retrainer_status.json"

@@ -66,14 +66,14 @@ Every other script calls `load_config()` at startup.
 |-------|---------|-------------|
 | hidden_layers | [512, 256, 128, 64] | MLP layer sizes |
 | n_components | 6 | number of Gaussian mixture components (K) |
-| dropout | 0.02 | dropout rate (was 0.05, reduced to 0.02 -- recovered 12 fen) |
+| dropout | 0.02 | dropout rate (was 0.05, reduced to 0.02 - recovered 12 fen) |
 | sigma_floor | 0.05 | minimum sigma to prevent collapse |
 
 **bins section:**
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| num_bins | 200 | number of discrete price bins |
+| num_bins | 200 | number of discrete price bins (deployed model overrides to 301 for uniform integer-fen bins) |
 | hidden_layers | [512, 256, 128, 64] | MLP layer sizes |
 | dropout | 0.1 | dropout rate |
 | price_min | 0 | minimum price bin |
@@ -92,7 +92,7 @@ Every other script calls `load_config()` at startup.
 | warmup_steps | 500 | linear warmup steps before cosine decay |
 | ema_decay | 0.99 | exponential moving average decay |
 | seed | 42 | random seed |
-| num_workers | 4 | (unused -- data loaded all at once, not with DataLoader) |
+| num_workers | 4 | (unused - data loaded all at once, not with DataLoader) |
 
 **evaluation section:**
 
@@ -237,8 +237,8 @@ The main function does the following:
 
 ### Output Files
 
-- `exports/<name>/best.pt` -- model checkpoint
-- `logs/train_<name>.log` -- training log (printed to both stdout and file)
+- `exports/<name>/best.pt` - model checkpoint
+- `logs/train_<name>.log` - training log (printed to both stdout and file)
 
 ---
 
@@ -269,7 +269,7 @@ For bins, stores: probs (softmax of logits), log_prob (log of predicted
 probability at the true bin), log_pp, pp, bid.
 
 The log_prob for bins is computed as:
-`log(probs.gather(1, true_bin).clamp(min=1e-30))` -- grab the predicted
+`log(probs.gather(1, true_bin).clamp(min=1e-30))` - grab the predicted
 probability at the true price index.
 
 **compute_pit_mdn(preds):**
@@ -344,7 +344,7 @@ Newton optimizer regret for bins.
 
 ### Output Files
 
-- `exports/<name>/eval_<split>.pkl` -- results dict with:
+- `exports/<name>/eval_<split>.pkl` - results dict with:
 
   | Key | Type | Description |
   |-----|------|-------------|
@@ -358,7 +358,7 @@ Newton optimizer regret for bins.
   | regret_vbid_newton | float | mean regret at V=bidding_price (Newton) |
   | per_adv_regret_v150 | dict | {advertiser_id: mean_regret} |
 
-- `exports/<name>/preds_<split>.pt` (if --save_preds) -- full prediction
+- `exports/<name>/preds_<split>.pt` (if --save_preds) - full prediction
   tensors including model outputs, ground truth, PIT values, and
   click/conv labels (for test split).
 
@@ -409,14 +409,15 @@ optimization without any additional post-processing.
 
 ```
 Inputs:
-  cat   [B, 9]    int64    -- encoded categorical feature indices
-  cont  [B, 9]    float32  -- continuous + cyclical + binary features
-  tags  [B, 10]   int64    -- user tag indices (padded with 0)
+  cat   [B, 9]    int64    - encoded categorical feature indices
+  cont  [B, 9]    float32  - continuous + cyclical + binary features
+  tags  [B, 10]   int64    - user tag indices (padded with 0)
 
 Output:
-  probs [B, N]    float32  -- probability per price bin (sums to 1)
+  probs [B, N]    float32  - probability per price bin (sums to 1)
 
-N = num_bins (200 for quantile-spaced, 301 for uniform)
+N = num_bins. The deployed model uses 301 uniform bins (bin index = price
+in fen); the quantile-spaced research model used 200.
 Opset: 17
 Dynamic batch axis on dim 0
 ```
@@ -455,29 +456,39 @@ cd rtb-bid-model
 # 1. Feature engineering (takes ~10 min on 12M rows)
 PYTHONPATH=src python src/features.py
 
-# 2. Train best single model (bins, quantile-spaced, 200 bins)
-PYTHONPATH=src python src/train.py --model bins --name bins_quant200 \
-  --hidden 512,256,128,64 --batch_size 8192 --num_bins 200 \
+# 2. Train the deployed single model (uniform bins, 301 integer-fen bins 0..300)
+PYTHONPATH=src python src/train.py --model bins --name bins_300 \
+  --hidden 512,256,128,64 --batch_size 8192 --num_bins 301 \
   --lr 1e-3 --dropout 0.1 --weight_decay 5e-4 --ema_decay 0.99 \
   --seed 42 --epochs 5
 
-# 3. Train MDN for ensemble
+# 3. (Offline research only) train an MDN member for the ensemble study
 PYTHONPATH=src python src/train.py --model mdn --name mdn_s42 \
   --hidden 512,256,128,64 --batch_size 8192 --K 6 \
   --lr 1e-3 --dropout 0.02 --weight_decay 5e-4 --ema_decay 0.99 \
   --sigma_floor 0.05 --seed 42 --epochs 5
 
-# 4. Evaluate single model
+# 4. Evaluate the deployed model
 PYTHONPATH=src python src/evaluate.py \
-  --ckpt exports/bins_quant200/best.pt \
-  --name bins_quant200 --split test
+  --ckpt exports/bins_300/best.pt \
+  --name bins_300 --split test
 
-# 5. Export to ONNX
+# 5. Export to ONNX (defaults already point at bins_300)
 PYTHONPATH=src python src/export_onnx.py \
-  --ckpt exports/bins_quant200/best.pt \
+  --ckpt exports/bins_300/best.pt \
   --out exports/best_model.onnx \
   --feature_config exports/feature_config.json
 ```
+
+The deployed model is uniform `bins_300` (301 bins, bin index k = price k fen,
+test regret 20.33), not the quantile-spaced `bins_quant200` that scored 0.16 fen
+better offline (20.17). Quantile bins place the edges at training-payprice
+quantiles, so the bin index no longer equals the price. Serving them correctly
+would need the bin edges exported into feature_config.json plus an edge-aware
+bid optimizer in the C++ server, neither of which was built. Uniform bins keep
+the bin-index = price-in-fen invariant that the fixture, backtest, retrainer,
+and C++ optimizer all assume, so they are the safe choice for deployment. See
+experiments.md and RESULTS.md for the offline comparison.
 
 ---
 

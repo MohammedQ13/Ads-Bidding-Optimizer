@@ -1,0 +1,118 @@
+# Full system: the four C++ companies, the Go auction engine, and the Python
+# retrainer, all wired into the live feedback loop. No Prometheus/Grafana - the
+# engine serves the scoreboard as JSON/SSE on :9200 for a custom frontend.
+#
+#   docker compose up --build
+#
+# Two shared volumes tie the loop together:
+#   - data:   the engine writes auction outcomes here, the retrainer reads them
+#   - models: the retrainer writes a new ONNX here, the companies watch and swap
+#
+# Note: ports 50051-50054 / 9200 may clash with other local stacks; change the
+# host side of the mappings if needed.
+services:
+  # seed the shared models volume with the starting model before companies boot
+  model-seed:
+    build: ./cpp-bidder
+    image: cpp-bidder:latest
+    command: ["sh", "-c", "cp -n models/bid_model.onnx /models/bid_model.onnx && echo seeded"]
+    volumes:
+      - models:/models
+
+  company-a:
+    image: cpp-bidder:latest
+    container_name: company-a
+    restart: unless-stopped
+    command: ["./build/bid_server", "config/company_a_live.yaml"]
+    depends_on:
+      model-seed:
+        condition: service_completed_successfully
+    volumes:
+      - models:/models
+    ports:
+      - "50051:50051"
+      - "9101:9100"
+
+  company-b:
+    image: cpp-bidder:latest
+    container_name: company-b
+    restart: unless-stopped
+    command: ["./build/bid_server", "config/company_b_live.yaml"]
+    depends_on:
+      model-seed:
+        condition: service_completed_successfully
+    volumes:
+      - models:/models
+    ports:
+      - "50052:50051"
+      - "9102:9100"
+
+  company-c:
+    image: cpp-bidder:latest
+    container_name: company-c
+    restart: unless-stopped
+    command: ["./build/bid_server", "config/company_c_live.yaml"]
+    depends_on:
+      model-seed:
+        condition: service_completed_successfully
+    volumes:
+      - models:/models
+    ports:
+      - "50053:50051"
+      - "9103:9100"
+
+  company-d:
+    image: cpp-bidder:latest
+    container_name: company-d
+    restart: unless-stopped
+    command: ["./build/bid_server", "config/company_d_live.yaml"]
+    depends_on:
+      model-seed:
+        condition: service_completed_successfully
+    volumes:
+      - models:/models
+    ports:
+      - "50054:50051"
+      - "9104:9100"
+
+  engine:
+    build: ./go-engine
+    image: rtb-engine:latest
+    container_name: engine
+    restart: unless-stopped
+    depends_on:
+      - company-a
+      - company-b
+      - company-c
+      - company-d
+    volumes:
+      - data:/data
+      # read-only: the engine reads the retrainer's status file to surface the
+      # training loop in the live telemetry
+      - models:/models:ro
+    # the live scoreboard the custom frontend reads: /stats (JSON), /events (SSE)
+    ports:
+      - "9200:9200"
+
+  retrainer:
+    build: ./retrainer
+    image: rtb-retrainer:latest
+    container_name: retrainer
+    restart: unless-stopped
+    depends_on:
+      - engine
+    volumes:
+      - data:/data
+      - models:/models
+    # cap PyTorch's thread pool so a training round can't grab every core and
+    # starve the C++ bidders (which would spike their tail latency). On an
+    # 8-vCPU box this leaves the fleet plenty of headroom during retraining.
+    environment:
+      OMP_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
+    cpus: 2.0
+    # defaults: read /data/outcomes.jsonl, write /models/bid_model.onnx every 60s
+
+volumes:
+  models:
+  data:

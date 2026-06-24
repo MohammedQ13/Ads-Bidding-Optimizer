@@ -50,7 +50,7 @@ def mdn_cdf(pi_logits, mu, sigma, x):
         comp = 0.5 * (1.0 + torch.erf(z))
         return (pi * comp).sum(dim=-1)
     else:
-        # x: (B, T) -- evaluate CDF at multiple points per sample
+        # x: (B, T) - evaluate CDF at multiple points per sample
         z = (x.unsqueeze(2) - mu.unsqueeze(1)) / (sigma.unsqueeze(1) * math.sqrt(2.0))
         comp = 0.5 * (1.0 + torch.erf(z))
         return (pi.unsqueeze(1) * comp).sum(dim=-1)

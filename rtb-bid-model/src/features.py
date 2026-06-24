@@ -81,7 +81,7 @@ def basic_features_inplace(df, is_test=False):
     sf = sf.replace({'Na': '0', 'na': '0', 'NA': '0', '': '0'})
     df['slot_format'] = pd.to_numeric(sf, errors='coerce').fillna(0).astype('int32')
 
-    # advertiser stays string for now (later encoded)
+    # advertiser stays a string here, it gets encoded in a later pass
     df['advertiser_id'] = df['advertiser_id'].astype(str)
 
     # parse timestamp (format: YYYYMMDDHHmmss)

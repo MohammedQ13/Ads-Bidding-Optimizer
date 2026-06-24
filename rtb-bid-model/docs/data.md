@@ -76,7 +76,7 @@ bounded on machines with limited RAM.
 Three constants define the raw data schema:
 
 - `COLNAMES`: list of 24 column names matching the iPinYou TSV format
-- `TEST_EXTRA`: `['click', 'conversion']` -- two extra columns in the test file
+- `TEST_EXTRA`: `['click', 'conversion']` - two extra columns in the test file
 - `KEEP_RAW`: list of 14 columns we actually need (the rest are dropped early to save memory)
 
 ### Pass A: Parse and Basic Features
@@ -100,7 +100,7 @@ Numeric conversions:
 - region, city, ad_exchange, slot_width, slot_height, slot_visibility:
   string -> int32 (with coerce + fillna(0) for malformed values)
 - slot_floor_price, bidding_price, payprice: string -> float32
-- slot_format: special handling -- replaces 'Na'/'na'/'NA'/'' with '0'
+- slot_format: special handling - replaces 'Na'/'na'/'NA'/'' with '0'
   before numeric conversion
 - advertiser_id: stays as string (encoded later in Pass C)
 
@@ -123,7 +123,7 @@ Engineered features:
 Columns dropped after feature extraction: timestamp, hour, weekday,
 slot_floor_price (replaced by log_floor_price and has_floor_price).
 
-user_tags string is kept for now -- it gets encoded in Pass C.
+user_tags string is kept here and gets encoded in Pass C.
 
 Each file is saved as an intermediate parquet in `data/processed/_inter/`.
 Memory is freed with `del df; gc.collect()` after each file.
@@ -147,7 +147,7 @@ builds the vocabulary:
 Builds a value-to-index mapping. Index 0 is reserved for `<UNK>`
 (unknown/rare values). Iterates `counter.most_common()` and assigns
 sequential indices starting from 1. Values with count below `min_count`
-are excluded -- they will map to index 0 at encoding time.
+are excluded - they will map to index 0 at encoding time.
 
 Min count thresholds from config.yaml:
 - domain: 100 (rare domains -> index 0)
@@ -165,8 +165,8 @@ represents padding in the tag sequence. Final tag vocab ~14K entries.
 
 Running sums are computed in a single pass over the training portion:
 - sum and sum-of-squares for log_payprice, log_floor_price, slot_area, tag_count
-- Mean and std derived from these (Welford-style without explicit Welford --
-  just `mean = sum/n`, `std = sqrt(sum_sq/n - mean^2)`)
+- Mean and std derived from these (one-pass formula, no explicit Welford:
+  `mean = sum/n`, `std = sqrt(sum_sq/n - mean^2)`)
 
 These are computed on the training set only and later applied to
 train, val, and test.
@@ -246,13 +246,13 @@ split, which has click and conversion columns.
 | `self.cat` | (N, 9) | int64 | packed categorical feature indices |
 | `self.cont` | (N, 9) | float32 | 3 standardized + 2 binary + 4 cyclical |
 | `self.tags` | (N, 10) | int64 | user tag indices, padded with 0 |
-| `self.log_pp` | (N,) | float32 | log(payprice) -- training target |
+| `self.log_pp` | (N,) | float32 | log(payprice) - training target |
 | `self.pp` | (N,) | float32 | raw payprice (for regret computation) |
 | `self.bid` | (N,) | float32 | iPinYou's bidding_price |
 | `self.adv` | (N,) | str | advertiser ID strings |
 | `self.click` | (N,) | int64 | click label (only if has_extras) |
 | `self.conv` | (N,) | int64 | conversion label (only if has_extras) |
-| `self.n` | int | -- | number of samples |
+| `self.n` | int | - | number of samples |
 
 The 9 continuous features are packed in this order:
 1. log_floor_price (z-score standardized)
@@ -276,7 +276,7 @@ Generator that yields batches as dicts with keys `cat`, `cont`, `tags`,
 `log_pp`, `pp`, `bid`. If shuffle=True, generates a random permutation
 of indices (using an optional torch.Generator for reproducibility).
 If drop_last=True, drops the final incomplete batch. The shuffle
-permutes indices, not the actual data arrays -- this avoids copying
+permutes indices, not the actual data arrays - this avoids copying
 large tensors.
 
 `num_batches(batch_size, drop_last=False)`:
@@ -288,20 +288,20 @@ the LR schedule.
 
 ## Data Splits
 
-- Train: first 85% of training data (chronological, no shuffle) -- ~10.4M impressions
-- Val: last 15% of training data -- ~1.8M impressions
-- Test: separate held-out file (June 13-15) -- ~2.5M impressions
+- Train: first 85% of training data (chronological, no shuffle) - ~10.4M impressions
+- Val: last 15% of training data - ~1.8M impressions
+- Test: separate held-out file (June 13-15) - ~2.5M impressions
 
 Temporal ordering is preserved to avoid data leakage. The test set is
 naturally from a later time period than training. The train-test
-distribution shift is the main performance ceiling -- the model cannot
+distribution shift is the main performance ceiling - the model cannot
 predict market changes it has never seen.
 
 ## Selection Bias (Winner's Curse)
 
 The impression log ONLY contains auctions that iPinYou won. We never see
 auctions where they bid too low and lost. This means the observed clearing
-prices are biased -- we systematically miss expensive auctions.
+prices are biased - we systematically miss expensive auctions.
 
 iPinYou used a "fixed relatively high-price bidding strategy" for data
 collection, so they won most auctions. Looking at the data, their bids

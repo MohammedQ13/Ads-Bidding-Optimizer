@@ -1,0 +1,13 @@
+import { chromium } from "playwright";
+const URL = process.env.SHOT_URL || "http://localhost:3000";
+const b = await chromium.launch();
+const ctx = await b.newContext({ viewport: { width: 1280, height: 900 }, deviceScaleFactor: 1.5 });
+const p = await ctx.newPage();
+await p.goto(URL, { waitUntil: "domcontentloaded" });
+await p.waitForFunction(() => document.body.innerText.includes("OPERATIONAL"), { timeout: 30000 }).catch(() => {});
+await p.waitForTimeout(2500);
+await p.click('[aria-label="How it works"]');
+await p.waitForTimeout(800);
+await p.screenshot({ path: "shot-about.png" });
+console.log("wrote shot-about.png");
+await b.close();

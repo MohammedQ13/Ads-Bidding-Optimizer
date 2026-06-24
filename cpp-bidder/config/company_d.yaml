@@ -1,0 +1,22 @@
+# Company D: budget-paced. Runs the model straight (multiplier 1.0); the Go
+# auction engine paces its spend across the simulated day by adjusting how often
+# it lets D bid, so the pacing logic lives engine-side, not here.
+grpc_address: "0.0.0.0:50051"
+metrics_port: 9100
+model_path: "models/bid_model.onnx"
+feature_config_path: "models/feature_config.json"
+dsp_id: "company-d"
+strategy_type: "budget_paced"
+bid_multiplier: 1.0
+batch_workers: 2
+batch_max_size: 32
+batch_timeout_us: 1000
+queue_max_size: 4096
+breaker_failure_threshold: 5
+breaker_cooldown_ms: 5000
+dedup_cache_size: 10000
+dedup_cache_ttl_ms: 500
+fallback_bid: 80.0
+fallback_shading: 0.7
+watch_model: false
+watch_interval_ms: 2000

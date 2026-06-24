@@ -1,10 +1,10 @@
-# Build Plan -- Phases 2-4
+# Build Plan - Phases 2-4
 
 ## The Big Picture
 
 ```
   DSP "Company A"  DSP "Company B"  DSP "Company C"  DSP "Company D"
-  (aggressive)     (conservative)   (profit-max)     (budget-paced)
+  (profit-max)     (aggressive)     (conservative)   (budget-paced)
        |                |                |                |
        +-------+--------+--------+-------+
                |        gRPC     |
@@ -42,15 +42,26 @@ better over time by learning from its own competitive environment.
 
 ## Model Deployment Decision
 
+> CORRECTION (June 2026): the deployed single model is now **bins_300**
+> (uniform 301 bins, 20.327 fen), not bins_quant200. A backtest on real data
+> caught that bins_quant200 is *quantile-spaced* - its bin index is not the
+> price in fen, it maps through an `edges` array that was never exported. The
+> C++ server (and the whole pipeline) assume bin index == price, which is only
+> correct for uniform bins. Deploying quant200 produced wrong bids (regret ~30).
+> Switching to the uniform bins_300 makes the bin==price assumption correct with
+> no code change, at a cost of 0.16 fen. Lesson: don't deploy a quantile-binned
+> model without exporting the edges and an edge-aware optimizer.
+
 The ML phase produced two final results: a single model (bins_quant200,
 20.17 fen regret) and an ensemble of 5 models (19.908 fen). The C++
 server needs to load and run one of these. Three options were considered.
 
 ### Option A: Single model (chosen)
 
-Export bins_quant200 as one ONNX file. The C++ server loads it, runs
-inference, returns the 200-bin probability distribution to the Go
-engine, which computes the optimal bid.
+Export a single bins model as one ONNX file. The C++ server loads it, runs
+inference, returns the bin probability distribution to the Go engine, which
+computes the optimal bid. (Per the correction above, the deployed file is the
+uniform 301-bin bins_300, not bins_quant200.)
 
 Pros:
 - One ONNX file, simple to load and swap on retrain
@@ -121,7 +132,41 @@ pragmatic fallback: re-export the ensemble as a single ONNX and get
 
 ---
 
-## Phase 2 -- C++ Inference Server (May-Jul 2026)
+## Phase 2 - C++ Inference Server (May-Jul 2026)
+
+The deep design (threading model, ONNX thread oversubscription,
+micro-batching tradeoffs, memory, hot-reload seam, backpressure, tail
+latency, horizontal scaling, capacity, benchmarking) is in cpp_server.md.
+This section is the week-by-week task breakdown.
+
+### Status: functionally complete (June 2026)
+
+The server is built and verified end to end (code in ../../cpp-bidder, see its
+README). What is done:
+
+- Hot path: feature_store + ONNX inference + bid optimizer, with a parity test
+  proving the C++ encoding/bid math matches the Python pipeline exactly (5 cases,
+  cat/tag/cont/probs/bids all match). This is the correctness anchor.
+- Reliability: micro-batcher (bounded queue), LRU dedup cache (TTL), circuit
+  breaker, fallback bid.
+- Observability/ops: Prometheus /metrics, gRPC health (SERVING/NOT_SERVING),
+  graceful SIGTERM drain, YAML config (one binary, four company strategies).
+- Hot-reload seam: atomic session swap in ModelSession; file watcher wired but
+  off by default (Phase 3 turns it on).
+- Packaging: Dockerfile (gRPC + ONNX RT + prometheus-cpp), docker-compose with
+  4 companies + Prometheus + Grafana (provisioned scoreboard dashboard).
+- Benchmarks: test/bench_engine.cpp + test/bench.cpp. Compute ceiling ~965k
+  bids/sec (~1.0µs/bid) on a compute-optimized 16-vCPU c2d-standard-16 node (a
+  budget e2-standard-16 gives ~620k); async gRPC ~56k req/s at p99 2.4ms (inside
+  the 10ms budget), ~79k req/s peak, server-side inference sub-ms. The dashboard
+  market is paced (~200 auctions/sec) for readability, not a capacity limit.
+  Full numbers + the three-layer explanation in cpp-bidder/docs/benchmarks.md.
+
+Deviation from the design below: we used the synchronous gRPC API with a bounded
+thread pool + micro-batcher rather than async completion queues. Simpler and
+correct; async is the documented upgrade path if a benchmark shows the sync pool
+is the bottleneck. Remaining: the N/T micro-batcher sweep and an open-loop
+benchmark (Phase 4 polish).
 
 ### Week 1: Docker + dependencies + hello world
 
@@ -260,7 +305,33 @@ End-to-end: BidRequest -> features -> ONNX -> bid -> BidResponse.
 
 ---
 
-## Phase 3 -- Go Auction Engine + Feedback Loop (Aug-Sep 2026)
+## Phase 3 - Go Auction Engine + Feedback Loop (Aug-Sep 2026)
+
+### Status: MVP built and verified end to end (June 2026)
+
+The Go engine and the feedback loop are built (go-engine/ and retrainer/, each
+with a README) and verified in Docker:
+
+- Go auction engine: broadcasts BidRequest to the 4 companies with a 10ms
+  deadline, runs first-price auctions against synthetic competitors, sends
+  NotifyOutcome, tracks per-company budget, exposes its own Prometheus metrics,
+  and logs outcomes to a JSONL file. Verified: 10K+ auctions, the company-side
+  scoreboard metrics (wins, profit) climb.
+- Python sliding-window retrainer: reads the outcome log, fine-tunes the bins
+  model warm-started from the iPinYou checkpoint, exports a single
+  self-contained ONNX. Verified: produces a drop-in model that adapted to the
+  synthetic market.
+- Live hot-reload: turned on the C++ model watcher; the retrainer writes a new
+  ONNX to a shared volume; the C++ server detects it, validates it, and
+  atomically swaps it in. Verified: model_version ticks, bids change to the new
+  model, zero errors, zero downtime.
+- docker-compose (root docker-compose.yml): 4 companies + engine + retrainer +
+  Prometheus + Grafana, wired with shared data/models volumes.
+
+Deviation from the plan below: the outcome stream is a JSONL file, not Kafka
+(the documented MVP). Remaining for a richer demo: budget pacing for company D,
+better competitor calibration so the scoreboard is more balanced, and the
+strategy-comparison benchmark. Kafka / Redis / K8s stay optional.
 
 ### Week 1-2: Multi-DSP auction engine
 
@@ -273,6 +344,9 @@ multiple C++ DSP instances compete against each other.
   - Company B: aggressive (bid_multiplier=1.2, wins more, lower margin)
   - Company C: conservative (bid_multiplier=0.8, wins less, higher margin)
   - Company D: budget-paced (multiplier decreases over simulated day)
+  - Company E (optional): percentile bidder, bids the 70th percentile of
+    the predicted distribution, ignores the profit curve. Only if time
+    permits - docker-compose runs the 4 core companies.
 - [ ] 10ms deadline enforcement: late DSPs excluded from auction
 - [ ] First-price auction logic: highest bid wins, pays their bid
 - [ ] Win/loss notification back to each DSP via NotifyOutcome RPC
@@ -356,7 +430,7 @@ If regret worsens -> rollback to previous checkpoint
   - 1x Python retraining worker (sliding window from Kafka)
   - 1x Prometheus (scrapes all DSP pods)
   - 1x Grafana (dashboards)
-- [ ] Nginx or Envoy in front of DSPs? No -- Go engine calls each
+- [ ] Nginx or Envoy in front of DSPs? No - Go engine calls each
       DSP directly since they're separate companies, not load-balanced
       replicas of the same service
 - [ ] Benchmark 3: micro-batcher tuning
@@ -368,7 +442,7 @@ If regret worsens -> rollback to previous checkpoint
 
 ---
 
-## Phase 4 -- Polish + Demo (Oct-Nov 2026)
+## Phase 4 - Polish + Demo (Oct-Nov 2026)
 
 ### Week 1-2: Grafana dashboard (the demo artifact)
 

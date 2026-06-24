@@ -1,0 +1,24 @@
+-- threads=2 inflight=4 (=8 in-flight) --
+completed: 176024   errors: 0   wall: 8.00s
+throughput: 22002 req/s
+latency ms: p50=0.35 p95=0.47 p99=0.54 p999=0.63 max=1.96
+-- threads=2 inflight=16 (=32 in-flight) --
+completed: 347707   errors: 0   wall: 8.00s
+throughput: 43460 req/s
+latency ms: p50=0.70 p95=1.08 p99=1.56 p999=2.66 max=4.22
+-- threads=4 inflight=16 (=64 in-flight) --
+completed: 448002   errors: 0   wall: 8.00s
+throughput: 55988 req/s
+latency ms: p50=1.09 p95=1.78 p99=2.40 p999=3.41 max=20.56
+-- threads=4 inflight=32 (=128 in-flight) --
+completed: 533971   errors: 0   wall: 8.00s
+throughput: 66733 req/s
+latency ms: p50=1.85 p95=2.90 p99=3.98 p999=5.70 max=20.35
+-- threads=6 inflight=32 (=192 in-flight) --
+completed: 514618   errors: 0   wall: 8.00s
+throughput: 64303 req/s
+latency ms: p50=2.96 p95=4.30 p99=5.26 p999=6.89 max=21.39
+-- threads=4 inflight=64 (=256 in-flight) --
+completed: 594389   errors: 0   wall: 8.00s
+throughput: 74267 req/s
+latency ms: p50=3.35 p95=5.25 p99=7.88 p999=13.38 max=19.90

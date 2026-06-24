@@ -28,14 +28,14 @@ Impression value V is hardcoded at 150 fen. A real DSP computes:
 This requires a click-through rate model trained on click logs. The
 click/conversion logs exist in the iPinYou dataset but were not
 downloaded. The Go layer will pass V as a per-auction parameter, so
-the ML model does not need V -- it only predicts the clearing price
+the ML model does not need V - it only predicts the clearing price
 distribution.
 
 ### Single Market Period
 
 Training covers 7 days (June 6-12, 2013). Real ad markets shift
 constantly. The model needs periodic retraining in production.
-The closed-loop simulation in the Go layer solves this -- the model
+The closed-loop simulation in the Go layer solves this: the model
 trains on data from its own operating environment continuously.
 
 ### No Domain Quality Features
@@ -63,7 +63,7 @@ on true first-price auction outcomes.
 
 The train/test split is temporal (June 6-12 train, June 13-15 test).
 Market conditions shift between these windows. This is the primary
-performance ceiling -- the last 5 optimization attempts all landed in
+performance ceiling: the last 5 optimization attempts all landed in
 [19.908, 20.001] fen regret, suggesting we have hit the limit of what
 offline training on this split can achieve.
 
@@ -80,8 +80,8 @@ These directions were tested during cloud training rounds 1-4:
 - **Architecture variants**: wider (1024-512-256-128), deeper (5 layers),
   narrower (256-128-64). All worse than 512-256-128-64.
 - **LightGBM quantile regression**: 14 quantile levels, interpolated CDF.
-  21.84 fen -- worse than neural bins but ran in minutes.
-- **LightGBM regression**: point estimate, 37.13 fen -- proved
+  21.84 fen, worse than neural bins but ran in minutes.
+- **LightGBM regression**: point estimate, 37.13 fen, proved
   distributional prediction is mandatory.
 - **Ensemble search**: exhaustive weight search over model combinations.
   Best: 3 MDN + 2 bins at 19.908 fen.
@@ -103,7 +103,7 @@ These directions were tested during cloud training rounds 1-4:
 After training, the PIT (Probability Integral Transform) check tells us
 if the predicted distributions are calibrated. If the PIT histogram is
 not uniform, apply post-hoc calibration (isotonic regression or Platt
-scaling on the CDF values). Tested during Round 1 -- improved NLL but
+scaling on the CDF values). Tested during Round 1 - improved NLL but
 hurt regret. May be worth revisiting with bins models.
 
 ### Per-Advertiser Conditioning
@@ -127,21 +127,30 @@ Risk: increased input dimensionality, possible overfitting.
 With the Go feedback loop:
 - Sliding window of last W simulation outcomes (e.g. 500K)
 - Fine-tune current checkpoint on the window periodically
-- Oldest data drops out as new data arrives -- prevents synthetic
+- Oldest data drops out as new data arrives, which prevents synthetic
   accumulation and keeps the model grounded in recent conditions
 - iPinYou-trained checkpoint is the warm start (real auction priors)
 - Pointer swap in C++ servers: background thread loads new ONNX,
   atomic shared_ptr swap, zero downtime
 - Drift detection: monitor val NLL on window, auto-retrain if degrading
 
-### ONNX Re-Export
+### ONNX Export (done)
 
-Current ONNX export uses bins_300 (uniform, 20.33 fen). Needs to be
-re-exported as bins_quant200 (20.17 fen) before Phase 2 starts. The
-ensemble (19.908 fen) was not chosen for deployment -- see the Model
-Deployment Decision section in build_plan.md for the full rationale.
-The single model is simpler to serve and the ensemble advantage
-disappears once the feedback loop retrains on live data.
+The deployment model is exported. It is the uniform bins_300 (301 bins,
+20.33 fen), verified against the PyTorch outputs (max diff 4.5e-7). That
+file (exports/best_model.onnx) is what the C++ server loads in Phase 2.
+
+bins_quant200 (0.16 fen better) was not deployed. Its bins are quantile-
+spaced, so the bin index is not the price in fen; it maps through an edges
+array that was never exported. The C++ pipeline assumes bin index equals
+price, which only holds for uniform bins, so deploying quant200 as-is gave
+wrong bids (regret around 30). Uniform bins_300 makes that assumption
+correct with no code change, at a cost of 0.16 fen.
+
+The ensemble (19.908 fen) was not chosen for deployment either. See the
+Model Deployment Decision section in build_plan.md for the full rationale.
+The single model is simpler to serve and the ensemble advantage disappears
+once the feedback loop retrains on live data.
 
 ## Planned Infrastructure Improvements
 
@@ -159,29 +168,34 @@ Save all auction requests and outcomes to a log. Replay with different
 model versions or strategies to compare performance offline. Cheaper
 than running live A/B tests.
 
-### Grafana Dashboard
+### Real-time Dashboard (BUILT, custom console, not Grafana)
 
-Real-time panels:
-- QPS across all DSP instances
-- Latency percentiles (p50/p95/p99)
-- Win rate (trailing 1000 auctions)
-- Profit per won auction
-- Model version per instance
-- Circuit breaker state
-- Fallback rate
-- Budget utilization per advertiser
+We dropped Grafana for a custom Next.js telemetry console (`dashboard/`) fed by
+the Go engine's JSON/SSE API. Every panel originally planned for Grafana now
+exists in it, plus more (live topology, the model's bid vs P(win) curve, calibration,
+the live auction stream, the competitor-archetype market mix):
+
+- QPS / throughput across all DSP instances: done (KPI strip + topology)
+- Latency percentiles p50/p95/p99: done (round-trip and ONNX inference, vs the
+  bid deadline, in the Latency budget panel)
+- Win rate + profit per won auction: done (strategy cards + profit race)
+- Model version per instance: done (scraped from each `/metrics`)
+- Circuit breaker state, fallback rate: done (C++ internals table + cards)
+- Budget utilization per advertiser: done (per-strategy budget bars)
+
+See `dashboard/README.md`. The engine scrapes each C++ `/metrics` and reads the
+retrainer status file, so the console is the single pane for the whole system.
 
 ## Technical Debt
 
-- QuantileTransformer in C++: the Python export already saves the full
-  quantile and reference arrays to feature_config.json. The C++ server
-  needs to implement the inverse transform (binary search + interpolation
-  + erfinv) using those arrays.
-- Tag encoding in C++: vocab lookup table already exported in
-  feature_config.json. C++ needs to load and index it.
-- Feedback pipeline: needs message queue (Kafka or similar) to stream
-  auction results back for retraining.
-- Model versioning: needs a proper registry, not just file paths.
-  Track which version runs on which instance, rollback capability.
-- Bid computation in C++: replace grid search (500 candidates) with
-  ternary search (~30 iterations) for nanosecond bid optimization.
+- Feedback pipeline: the MVP streams auction outcomes through a JSONL file.
+  Production should use a message queue (Kafka or similar) to stream
+  results back for retraining.
+- Model versioning: needs a proper registry, not just file paths. Track
+  which version runs on which instance, with rollback capability.
+- Bid computation in C++: the optimizer scans every price bin (301 of them)
+  per request. That is already cheap, a few hundred multiply-adds, but a
+  smarter search such as ternary search could reduce it further. The catch
+  is that expected profit is not guaranteed unimodal in the bid for an
+  arbitrary predicted CDF, which is the same reason the Newton optimizer was
+  abandoned in favour of the full scan, so any such change needs care.

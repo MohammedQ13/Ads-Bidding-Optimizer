@@ -6,8 +6,8 @@ Most public RTB datasets (including iPinYou) come from the second-price
 auction era, where bidding your true value is the dominant strategy.
 The industry shifted to first-price auctions around 2019-2021. In a
 first-price auction you pay exactly what you bid, so bidding your true
-value means zero profit. You have to shade your bid below true value --
-bid just enough to win, not more.
+value means zero profit. You have to shade your bid below true value,
+bidding just enough to win and not more.
 
 We apply a first-price framing to the historical data. The observed
 clearing prices (payprice) represent what competitors were willing to
@@ -22,7 +22,7 @@ second-price, where you just bid your value.
 ## Why Distributional Prediction
 
 Most RTB models predict a single number (the expected clearing price).
-But knowing the average is not enough. Markets are volatile -- the
+But knowing the average is not enough. Markets are volatile: the
 clearing price for a given user segment might average 80 fen but the
 actual distribution ranges from 15 to 250 fen. Bidding 85 blindly
 means overpaying on cheap auctions and losing profitable expensive ones.
@@ -34,20 +34,16 @@ You need the full distribution so you can compute:
 where P(win at bid) = P(clearing_price < bid), which requires the CDF.
 
 We proved this empirically: LightGBM regression (point estimate) scored
-37.13 fen regret -- worse than blindly bidding the mean every time
+37.13 fen regret, worse than blindly bidding the mean every time
 (28.74 fen). Distributional prediction is not optional.
-
----
 
 ## Source Files
 
 The model architecture spans three source files:
 
-- `src/model.py` -- neural network classes (embeddings, backbone, output heads)
-- `src/loss.py` -- loss functions and probability computations (NLL, CDF, PDF)
-- `src/bid_optimizer.py` -- bid optimization algorithms (grid search, Newton)
-
----
+- `src/model.py` - neural network classes (embeddings, backbone, output heads)
+- `src/loss.py` - loss functions and probability computations (NLL, CDF, PDF)
+- `src/bid_optimizer.py` - bid optimization algorithms (grid search, Newton)
 
 ## Classes in model.py
 
@@ -80,8 +76,8 @@ Index 0 is reserved for padding/unknown in all embedding tables.
 
 **forward(cat, tags):**
 
-- `cat`: (B, num_cat_features) int64 -- one column per feature
-- `tags`: (B, 10) int64 -- up to 10 tag IDs per sample, padded with 0
+- `cat`: (B, num_cat_features) int64 - one column per feature
+- `tags`: (B, 10) int64 - up to 10 tag IDs per sample, padded with 0
 
 Steps:
 1. Look up each categorical feature's embedding: `embs[i](cat[:, i])` for each feature i
@@ -129,7 +125,7 @@ Contains:
 - `self.emb`: CategoricalEmbeddings instance
 - `self.cont_norm`: nn.Identity() (normalization is done in features.py)
 - `self.backbone`: MLPBackbone(emb.out_dim + num_continuous, hidden, dropout)
-- `self.head`: nn.Linear(backbone.out_dim, 3 * K) -- outputs pi, mu, sigma for each component
+- `self.head`: nn.Linear(backbone.out_dim, 3 * K) - outputs pi, mu, sigma for each component
 - `self.K`, `self.sigma_floor`
 
 **forward(cat, cont, tags):**
@@ -138,16 +134,16 @@ Contains:
 2. Concatenate with continuous features
 3. Run through backbone
 4. Split head output (3*K values) into three (B, K) tensors:
-   - `pi_logits = out[:, :K]` -- raw mixture weights (pre-softmax)
-   - `mu = out[:, K:2*K]` -- component means in log-price space
-   - `log_sigma = out[:, 2*K:]` -- component log-standard-deviations
+   - `pi_logits = out[:, :K]` - raw mixture weights (pre-softmax)
+   - `mu = out[:, K:2*K]` - component means in log-price space
+   - `log_sigma = out[:, 2*K:]` - component log-standard-deviations
 5. Apply sigma activation: `sigma = softplus(log_sigma) + sigma_floor`
    - softplus ensures sigma > 0
    - sigma_floor prevents collapse to near-zero, which makes the NLL blow up
 
 Returns tuple: `(pi_logits, mu, sigma)`, each (B, K).
 
-The pi_logits are NOT softmaxed here -- the loss function handles that
+The pi_logits are NOT softmaxed here, the loss function handles that
 with log_softmax for numerical stability. When computing the CDF for
 bid optimization, softmax is applied to get actual mixture weights.
 
@@ -155,7 +151,7 @@ bid optimization, softmax is applied to get actual mixture weights.
 
 Softmax over discrete price bins. Each bin corresponds to an integer
 price level in CNY fen. Inspired by Deep Landscape Forecasting
-(Ren et al., KDD 2019). Simpler than MDN -- no parametric assumptions,
+(Ren et al., KDD 2019). Simpler than MDN - no parametric assumptions,
 just learn P(payprice == k) for each integer k.
 
 **Constructor:** `DiscreteBins(vocab_sizes, emb_dims, tag_vocab_size, tag_emb_dim, num_continuous, hidden, dropout, num_bins)`
@@ -168,7 +164,7 @@ Contains same embedding + backbone as MDN, but head is:
 **forward(cat, cont, tags):**
 
 Same embedding + backbone flow as MDN. Returns raw logits (B, num_bins).
-Softmax is applied externally -- by the loss function during training,
+Softmax is applied externally, by the loss function during training,
 and by BinsForExport during ONNX export.
 
 The CDF for bid optimization is just `cumsum(softmax(logits))`.
@@ -179,8 +175,6 @@ Utility function. Takes the artifacts dict from features.py and returns
 a dict of `{feature_name: vocab_size}` for constructing embedding tables.
 Each vocab size = `len(encoder) + 1` because index 0 is reserved for
 unknown/rare values.
-
----
 
 ## Embedding Dimensions
 
@@ -206,8 +200,6 @@ High-cardinality features (city, domain) are clipped: values appearing
 fewer than min_count times in training are mapped to a shared rare token
 (index 0). Thresholds: domain=100, city=500.
 
----
-
 ## Ensemble
 
 Weighted average of multiple models' CDFs in probability space. The
@@ -221,14 +213,12 @@ alone), while the bins model contributes accuracy. Together they beat
 either type alone.
 
 Key finding: a "bad" MDN with 33.13 fen regret alone still improved
-the ensemble. Calibration != bid quality -- the optimizer needs sharp
-peaks, not smooth distributions.
+the ensemble. Calibration is not the same as bid quality. The optimizer
+needs sharp peaks, not smooth distributions.
 
 The ensemble search used Dirichlet-random weight sampling over 200
 trials on a 200K subset, followed by greedy refinement, then full
 validation of top candidates.
-
----
 
 ## Loss Functions (loss.py)
 
@@ -278,8 +268,8 @@ where Phi is the standard normal CDF, computed via:
     Phi(z) = 0.5 * (1 + erf(z / sqrt(2)))
 
 Supports two input shapes:
-- `x`: (B,) -- one point per sample, returns (B,)
-- `x`: (B, T) -- T points per sample (for grid search), returns (B, T)
+- `x`: (B,) - one point per sample, returns (B,)
+- `x`: (B, T) - T points per sample (for grid search), returns (B, T)
 
 The multi-point mode is used by the bid optimizer to evaluate the CDF
 at all candidate bids in one vectorized call.
@@ -318,8 +308,6 @@ This way predicting bin 80 when the true price was 81 is penalized
 less harshly than predicting bin 50. Tested with sigma=1.0 and 2.0,
 but it didn't improve regret in practice (see experiments.md).
 
----
-
 ## Bid Optimization (bid_optimizer.py)
 
 The bid optimizer takes a predicted CDF and finds the bid that maximizes
@@ -331,8 +319,8 @@ where V is the impression value (150 fen default, or per-auction
 bidding_price) and CDF(b) = P(clearing_price < b) = probability of
 winning at bid b.
 
-All functions in `src/bid_optimizer.py`. All work in batched mode --
-they optimize bids for B impressions at once.
+All functions in `src/bid_optimizer.py`. All work in batched mode,
+optimizing bids for B impressions at once.
 
 ### grid_optimize_mdn(pi_logits, mu, sigma, V, n_candidates=500, b_max=300.0)
 
@@ -367,7 +355,7 @@ Steps:
 
 Returns: `(best_bid, best_profit, bin_indices, profit_grid)`
 
-The `n_candidates` and `b_max` args are unused -- the function just
+The `n_candidates` and `b_max` args are unused, the function just
 evaluates at every integer bin since there are only num_bins candidates.
 
 ### newton_optimize_mdn(pi_logits, mu, sigma, V, n_iters=25, n_starts=8, b_max=300.0)
@@ -417,7 +405,7 @@ Same Newton update: `b_new = V - CDF(b) / PDF(b)`.
 
 ### perfect_profit(payprice, V)
 
-Oracle profit -- what you'd earn with perfect knowledge of the
+Oracle profit: what you'd earn with perfect knowledge of the
 clearing price. If `V > payprice`, bid just above payprice and earn
 `V - payprice`. Otherwise skip (earn 0).
 
@@ -439,17 +427,13 @@ what you actually earned and what a perfect bidder would have earned.
 Lower regret = better bidding. This is the primary metric for
 comparing models.
 
----
-
 ## Why Not a Transformer
 
 The v1 of this project used a BidTransformer (transformer encoder on
-tabular features). It had convergence issues -- sigma would collapse
+tabular features). It had convergence issues: sigma would collapse
 or explode, and the self-attention was overkill for tabular data where
 there is no sequential structure. The MLP backbone is simpler, trains
 faster, and works better for this problem.
-
----
 
 ## Evaluation Metrics
 
@@ -464,14 +448,12 @@ faster, and works better for this problem.
 - **Coverage**: fraction of true prices within predicted intervals
   at each percentile threshold.
 
----
-
 ## Results Summary
 
 | Model                         | Regret (V=150) | ANLP  | KS   |
 |-------------------------------|----------------|-------|------|
-| Naive (bid mean payprice)     | 28.74          | --    | --   |
-| LightGBM regression (point)  | 37.13          | --    | --   |
+| Naive (bid mean payprice)     | 28.74          | -    | -   |
+| LightGBM regression (point)  | 37.13          | -    | -   |
 | LightGBM 14-quantile         | 21.84          | 6.77  | 0.20 |
 | Best MDN single (K=6, dp=0.02)| 21.21         | 4.52  | 0.21 |
 | Best bins single (quant 200) | 20.17          | 3.74  | 0.18 |

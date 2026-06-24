@@ -1,0 +1,51 @@
+# The four DSP "companies" on their own (C++ servers only). Each is the same
+# image with a different config (different dsp_id and bid_multiplier). For the
+# full system with the auction engine and the live scoreboard, use the root
+# docker-compose.yml instead.
+#
+# The :9100 endpoints still expose internal counters (prometheus format), but the
+# project's scoreboard is served by the Go engine as JSON/SSE, not Grafana.
+services:
+  company-a:
+    build: .
+    image: cpp-bidder:latest
+    container_name: company-a
+    command: ["./build/bid_server", "config/config.yaml"]
+    ports:
+      - "50051:50051"   # gRPC
+      - "9101:9100"     # internal stats
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9100/metrics >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  company-b:
+    image: cpp-bidder:latest
+    container_name: company-b
+    command: ["./build/bid_server", "config/company_b.yaml"]
+    depends_on:
+      - company-a
+    ports:
+      - "50052:50051"
+      - "9102:9100"
+
+  company-c:
+    image: cpp-bidder:latest
+    container_name: company-c
+    command: ["./build/bid_server", "config/company_c.yaml"]
+    depends_on:
+      - company-a
+    ports:
+      - "50053:50051"
+      - "9103:9100"
+
+  company-d:
+    image: cpp-bidder:latest
+    container_name: company-d
+    command: ["./build/bid_server", "config/company_d.yaml"]
+    depends_on:
+      - company-a
+    ports:
+      - "50054:50051"
+      - "9104:9100"

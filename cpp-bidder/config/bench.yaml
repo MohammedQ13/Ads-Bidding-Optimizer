@@ -1,0 +1,22 @@
+# Throughput-tuned config for benchmarking: more batch workers (one per server
+# core) and bigger batches so the micro-batcher is not the bottleneck.
+grpc_address: "0.0.0.0:50051"
+metrics_port: 9100
+model_path: "models/bid_model.onnx"
+feature_config_path: "models/feature_config.json"
+dsp_id: "bench"
+strategy_type: "profit_max"
+bid_multiplier: 1.0
+cq_threads: 4
+batch_workers: 6
+batch_max_size: 64
+batch_timeout_us: 500
+queue_max_size: 32768
+breaker_failure_threshold: 5
+breaker_cooldown_ms: 5000
+dedup_cache_size: 100000
+dedup_cache_ttl_ms: 500
+fallback_bid: 80.0
+fallback_shading: 0.7
+watch_model: false
+watch_interval_ms: 2000

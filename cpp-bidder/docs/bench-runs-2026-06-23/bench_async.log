@@ -1,0 +1,12 @@
+-- threads=6 inflight=512 dur=15s --
+completed: 1189495   errors: 0   wall: 15.04s
+throughput: 79099 req/s
+latency ms: p50=39.09 p95=56.71 p99=75.99 p999=110.09 max=126.03
+-- threads=8 inflight=512 dur=15s --
+completed: 1129942   errors: 0   wall: 15.03s
+throughput: 75158 req/s
+latency ms: p50=55.58 p95=65.92 p99=80.50 p999=103.43 max=136.28
+-- threads=8 inflight=1024 dur=15s --
+completed: 1176373   errors: 105938   wall: 15.06s
+throughput: 78121 req/s
+latency ms: p50=96.76 p95=159.81 p99=203.17 p999=240.80 max=266.15

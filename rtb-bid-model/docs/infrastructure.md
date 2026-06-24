@@ -2,7 +2,15 @@
 
 ## System Overview
 
-The full system simulates a real-world first-price RTB ad exchange.
+The full system simulates a first-price RTB ad exchange.
+
+Build status: the Go auction engine, the C++ bidders (4 strategies), the
+ONNX hot-reload feedback loop, Prometheus metrics, and the Next.js console
+are built and run under Docker Compose. Kafka, Redis, and Kubernetes are
+the planned production target and are not wired up yet; the working MVP
+uses a JSONL outcome log instead of Kafka, in-process budget state instead
+of Redis, and Docker Compose instead of K8s. Those sections below are
+labelled as planned where they describe components that are not built.
 
 ```
                 +------------------+
@@ -32,22 +40,29 @@ Async feedback path:
 
 **Technology choices and why:**
 
-- C++ for inference: deterministic sub-10ms p99 under concurrent load,
-  true parallelism, zero GC pauses.
+- C++ for inference: p99 ~2.4ms end-to-end at ~56k req/s per node, inside the
+  10ms deadline, with true parallelism and zero GC pauses. The compute kernel
+  alone does a bid every ~1us (~965k bids/sec).
 - Go for auction engine: goroutines and channels are built for I/O-bound
   concurrency (broadcasting to multiple DSPs, enforcing timeouts,
   collecting responses).
 - gRPC + protobuf for the hot path: binary serialization, sub-ms parsing,
   bidirectional streaming, native load balancing support.
-- Kafka for the cold path: decouples auction outcome logging from model
-  retraining. Auctions keep running while the training pipeline consumes
-  events at its own pace.
-- Kubernetes for orchestration: auto-scaling, rolling deployments for
-  model updates, health-check-based routing, service discovery.
+- Kafka for the cold path (planned): would decouple auction outcome logging
+  from model retraining so auctions keep running while the training pipeline
+  consumes events at its own pace. As built, the Go engine appends outcomes
+  to a JSONL file that the retrainer reads.
+- Kubernetes for orchestration (planned): auto-scaling, rolling deployments
+  for model updates, health-check-based routing, service discovery. As built,
+  the system runs under Docker Compose; there are no K8s manifests yet.
 - Prometheus + Grafana for observability: every production ML serving
   system has this. Histograms, counters, gauges on every component.
-- Redis (optional) for shared budget state across bidding instances.
-  When server A spends budget, servers B and C need to know.
+  (As built: the C++ servers still expose Prometheus `/metrics`, but instead
+  of Grafana the Go engine scrapes them and aggregates everything into one
+  JSON/SSE feed rendered by a custom Next.js console - see `dashboard/`.)
+- Redis (planned, optional) for shared budget state across bidding instances.
+  When server A spends budget, servers B and C need to know. As built, each
+  bidder tracks its own budget and the Go engine paces spend per company.
 - Python for offline training: PyTorch + ONNX export. Not in the hot path.
 
 ## The 10ms Constraint
@@ -57,7 +72,7 @@ The entire RTB pipeline (page load to ad rendered) happens in under
 request, encode features, run model inference, compute optimal bid,
 serialize response. This constraint drives every architectural decision.
 
-## Layer 1: ML Model (Python -- current)
+## Layer 1: ML Model (Python - current)
 
 Already built. Produces:
 - ONNX model file (bid_model.onnx) with dynamic batch sizes
@@ -82,47 +97,51 @@ layout.
 
 ### Service Definition (protobuf)
 
+The full service definition (including the NotifyOutcome RPC used by the
+Phase 3 feedback loop) lives in build_plan.md. The hot-path subset:
+
 ```protobuf
 service BidService {
   rpc GetBid(BidRequest) returns (BidResponse);
+  rpc NotifyOutcome(AuctionOutcome) returns (Ack);
   rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
 }
 
 message BidRequest {
   string request_id = 1;
-  string user_segment_id = 2;
-  string domain = 3;
-  int32  slot_width = 4;
-  int32  slot_height = 5;
-  int32  slot_visibility = 6;
-  int32  slot_format = 7;
-  int32  ad_exchange = 8;
-  int32  region = 9;
-  int32  city = 10;
-  string advertiser_id = 11;
-  repeated string user_tags = 12;
-  float  slot_floor_price = 13;
-  float  impression_value = 14;  // V, per-auction from Go layer
-  int64  timestamp = 15;
+  int32  region = 2;
+  int32  city = 3;
+  string domain = 4;
+  int32  ad_exchange = 5;
+  int32  slot_width = 6;
+  int32  slot_height = 7;
+  int32  slot_visibility = 8;
+  int32  slot_format = 9;
+  string advertiser_id = 10;
+  repeated string user_tags = 11;
+  float  slot_floor_price = 12;
+  float  impression_value = 13;   // V, set by Go engine per auction
+  int64  timestamp = 14;
 }
 
 message BidResponse {
-  float  bid_price = 1;
-  float  win_probability = 2;     // P(win at bid_price)
-  float  expected_profit = 3;     // (V - bid) * P(win)
-  bool   used_fallback = 4;
-  int64  inference_us = 5;        // inference duration microseconds
+  string dsp_id = 1;              // which "company" this is
+  float  bid_price = 2;
+  float  win_probability = 3;     // P(win at bid_price)
+  float  expected_profit = 4;     // (V - bid) * P(win)
+  bool   used_fallback = 5;
+  int64  inference_us = 6;        // inference duration microseconds
 }
 ```
 
-The model's mixture params (weights, mus, sigmas) stay server-side.
-The C++ server computes the bid and returns just the price. Less data
-over the wire, faster.
+The predicted bin distribution stays server-side. The C++ server computes
+the bid from the CDF and returns just the price plus a few diagnostics.
+Less data over the wire, faster.
 
 ### Component 1: Fixed Thread Pool
 
 Pre-allocate N worker threads at startup (typically 2x CPU cores).
-Fixed-size is deliberate -- dynamic pools allocate memory at request
+Fixed-size is deliberate - dynamic pools allocate memory at request
 time, adding latency jitter. Each worker has a pre-allocated feature
 vector buffer. Workers pull from a bounded work queue. When the queue
 is full, new requests get RESOURCE_EXHAUSTED (load shedding).
@@ -226,22 +245,37 @@ Simulates the exchange/SSP side. For each auction:
 1. Read auction record from dataset (or generate from simulation)
 2. Broadcast BidRequest to C++ DSP via gRPC
 3. Generate bids from N calibrated synthetic competitors
-4. Enforce 10ms deadline -- late DSPs excluded
-5. Run first-price auction -- highest bid wins, winner pays their bid
+4. Enforce 10ms deadline - late DSPs excluded
+5. Run first-price auction - highest bid wins, winner pays their bid
 6. Notify C++ DSP of win/loss and clearing price
 7. Log auction outcome for retraining
 
 ### Calibrated Synthetic Competitors
 
-3-5 simulated competitors per auction, drawing from distributions
-calibrated to empirical clearing prices in training data:
-- Aggressive bidder: draws from 60th-90th percentile
-- Conservative bidder: draws from 10th-40th percentile
-- Budget-constrained bidder: bid probability decreases as day progresses
-- Random bidder: uniform over wide range
+Simulated competitors per auction, set by `competitors.count`. The shipped
+`go-engine/config.yaml` runs 8 competitors (the code falls back to 4 if the
+config is missing the field). Each competitor draws a bid from a lognormal
+centered on the base median clearing price (`competitors.base_median`, 50 fen
+in the shipped config, 75 if unset), with sigma `competitors.spread` (0.5 in
+the shipped config, 0.6 if unset), then scales the draw by an archetype
+multiplier and floors it at 1 fen. The pool cycles through eight archetypes
+so a larger field still looks varied:
 
-Calibrate the mix to produce 20-40% win rate for the DSP, similar to
-real production.
+| Archetype | Multiplier |
+|-----------|------------|
+| whale | 1.6 |
+| aggressive | 1.4 |
+| sniper | 1.25 |
+| contender | 1.15 |
+| market | 1.0 |
+| value | 0.85 |
+| conservative | 0.7 |
+| bargain | 0.55 |
+
+Tuning the count, base median, and spread sets how hard the field is to
+beat. The shipped values (8 competitors, median 50, spread 0.5) produce a
+balanced market where all four C++ companies win some auctions rather than
+one running away with it.
 
 ### Budget Management
 
@@ -253,13 +287,13 @@ more conservatively. Budget pacing spreads spend evenly over time.
 
 V is per-auction, computed by the Go layer and passed in BidRequest.
 In a full system: V = pCTR * advertiser_CPA. For simulation, V comes
-from config per advertiser. The ML model never sees V -- it only
+from config per advertiser. The ML model never sees V - it only
 predicts clearing price distribution. V only matters for bid optimization.
 
 ## Multi-Instance Bidding Strategies
 
 This is where the distributional prediction pays off for the distributed
-system. A point estimate model outputs one number -- every server computes
+system. A point estimate model outputs one number - every server computes
 the same bid. Nothing to compare. A distributional model outputs a full
 probability curve, and different servers can apply different strategies
 on top of the same distribution:
@@ -270,10 +304,11 @@ on top of the same distribution:
   Wins more auctions, lower margin per win. Good when budget is flush.
 - **Server C (conservative):** 0.8x multiplier. Wins fewer auctions but
   only the cheap ones. High margin per win. Good for tight budgets.
-- **Server D (percentile bidder):** bids at the 70th percentile of the
-  predicted distribution. High win rate strategy, ignores profit curve.
-- **Server E (budget-paced):** starts aggressive early in the day, gets
+- **Server D (budget-paced):** starts aggressive early in the day, gets
   more conservative as daily budget drains. Multiplier decreases over time.
+- **Server E (percentile bidder, optional 5th strategy):** bids at the
+  70th percentile of the predicted distribution. High win rate, ignores
+  the profit curve. Added if time permits - the core demo runs A-D.
 
 All servers run the same ONNX model, get the same mixture distribution,
 but produce different bids. The Go auction engine pits them against each
@@ -283,8 +318,10 @@ other AND against synthetic competitors. You can measure:
 - Which strategy uses budget most efficiently
 - How strategies perform under different market conditions
 
-This is A/B testing of bidding strategies with real distributional
-predictions -- exactly how production DSPs evaluate changes.
+This is a live multi-strategy comparison rather than a classic A/B test:
+the strategies run as separate server instances against the same market and
+the same distributional predictions, so their profit and win-rate can be
+compared head to head, which is how production DSPs evaluate changes.
 
 The model also serves a second purpose: the Go layer can SAMPLE from the
 predicted distribution to generate realistic synthetic competitor bids.
@@ -298,14 +335,15 @@ learns from its own operating environment using a sliding window of
 recent auction outcomes.
 
 1. Pretrain: train initial model on iPinYou historical data (the warm
-   start -- gives the model real auction priors)
+   start - gives the model real auction priors)
 2. Simulate: auction engine generates traffic, DSP bids against
    competitors (synthetic + other C++ server instances)
-3. Collect: auction outcomes stream to Kafka topic. Each record is a
-   labeled example: auction features + actual clearing price.
+3. Collect: the Go engine appends each auction outcome to a JSONL log
+   (Kafka in the planned version). Each record is a labeled example:
+   auction features plus the actual clearing price.
 4. Sliding window: training pipeline maintains a buffer of the last W
    outcomes (e.g. 500K). As new data arrives, oldest data drops out.
-   This prevents synthetic data from accumulating indefinitely -- the
+   This prevents synthetic data from accumulating indefinitely - the
    model always trains on the most recent competitive environment.
 5. Fine-tune: Python script loads current checkpoint, runs a few NLL
    epochs on the sliding window, validates calibration on held-out 10%.
@@ -315,16 +353,21 @@ recent auction outcomes.
    then atomically swaps the session pointer
    (std::atomic<shared_ptr<Session>>). In-flight requests finish on the
    old model, new requests use the new model. Zero downtime.
-7. Observe: Grafana shows whether metrics improve after each swap.
-   If not, rollback to previous checkpoint.
+7. Observe: the Next.js console (fed by Prometheus scrapes) shows whether
+   metrics improve after each swap. If not, roll back to the previous
+   checkpoint.
 
 The sliding window means the model always reflects current conditions.
-It never drifts into training purely on synthetic data -- the window
+It never drifts into training purely on synthetic data - the window
 size bounds how much simulation data the model sees at any point, and
 the iPinYou-trained checkpoint provides the starting prior that grounds
 the model in real auction dynamics.
 
-## Kafka Event Pipeline
+## Kafka Event Pipeline (planned)
+
+Status: not built. The MVP uses a single JSONL outcome log written by the Go
+engine and read by the retrainer. The two-topic design below is the planned
+production version.
 
 Two Kafka topics:
 
@@ -342,7 +385,11 @@ Kafka decouples producers from consumers. Auctions run at full speed
 regardless of how fast the training pipeline processes events. Events
 are retained for replay. Multiple consumers can read the same stream.
 
-## Kubernetes Deployment
+## Kubernetes Deployment (planned)
+
+Status: not built. The working system runs under Docker Compose
+(`docker-compose.yml`); there are no K8s manifests in the repo yet. The
+layout below is the production target.
 
 ```
 Namespace: rtb-system
@@ -378,7 +425,12 @@ Why Kubernetes over Docker Compose:
 Docker Compose is still useful for local dev and quick demos. The
 Kubernetes manifests are the production deployment target.
 
-## Budget State with Redis
+## Budget State with Redis (planned)
+
+Status: not built. As built, each bidder tracks its own budget and the Go
+engine paces per-company spend, which is enough for the single-process demo.
+Shared Redis state matters once the same advertiser budget is split across
+multiple bidder replicas.
 
 Multiple bidding servers spend from the same advertiser budget. Without
 shared state, each server tracks budget independently and the total
@@ -402,7 +454,7 @@ dependency. Either approach works.
 1. Thread pool scaling: QPS vs pool size at fixed concurrency
 2. Latency vs concurrency: p50/p95/p99 at 50/100/200/500/800 clients
 3. Micro-batcher tuning: throughput vs p99 across batch size and timeout configs
-4. Bid quality: bid regret on held-out data -- MDN vs point estimate vs naive
+4. Bid quality: bid regret on held-out data - MDN vs point estimate vs naive
 5. Strategy comparison: total profit across 100K auctions for each
    bidding strategy (aggressive, conservative, profit-max, percentile, paced)
 

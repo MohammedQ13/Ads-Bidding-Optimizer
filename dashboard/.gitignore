@@ -1,0 +1,15 @@
+node_modules
+.next
+out
+build
+.env*.local
+.vercel
+*.tsbuildinfo
+next-env.d.ts
+shot-*.png
+crop-*.png
+# keep the canonical console screenshots referenced by the READMEs
+!shot-console-dark.png
+!shot-console-light.png
+
+.vercel

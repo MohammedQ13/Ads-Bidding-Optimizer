@@ -1,0 +1,36 @@
+{
+  "name": "rtb-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "geist": "1.7.2",
+    "lucide-react": "1.21.0",
+    "motion": "12.40.0",
+    "next": "16.2.6",
+    "next-themes": "0.4.6",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "recharts": "3.8.1",
+    "tailwind-merge": "3.6.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4",
+    "@types/node": "22",
+    "@types/react": "19",
+    "@types/react-dom": "19",
+    "gif-encoder-2": "^1.0.5",
+    "playwright": "^1.61.0",
+    "pngjs": "^7.0.0",
+    "tailwindcss": "4",
+    "typescript": "5",
+    "vercel": "^54.14.2"
+  }
+}

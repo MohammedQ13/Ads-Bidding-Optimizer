@@ -1,0 +1,70 @@
+syntax = "proto3";
+
+package bidding;
+
+// The DSP bidding service. The Go auction engine calls GetBid for every
+// auction, and later tells us whether we won through NotifyOutcome. Check is
+// a simple health probe so orchestration knows when we are ready to serve.
+service BidService {
+  rpc GetBid(BidRequest) returns (BidResponse);
+  rpc NotifyOutcome(AuctionOutcome) returns (Ack);
+  rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// One auction opportunity. These fields match the features the model was
+// trained on, plus the impression value V that the Go engine sets per
+// auction. The model never sees V; it only predicts the price distribution.
+message BidRequest {
+  string request_id = 1;
+  int32  region = 2;
+  int32  city = 3;
+  string domain = 4;
+  int32  ad_exchange = 5;
+  int32  slot_width = 6;
+  int32  slot_height = 7;
+  int32  slot_visibility = 8;
+  int32  slot_format = 9;
+  string advertiser_id = 10;
+  repeated string user_tags = 11;
+  float  slot_floor_price = 12;
+  float  impression_value = 13;   // V, set by the Go engine per auction
+  int64  timestamp = 14;
+}
+
+// What we decided to bid and a little context. dsp_id says which company
+// strategy answered (the same model can run under different strategies).
+message BidResponse {
+  string dsp_id = 1;
+  float  bid_price = 2;
+  float  win_probability = 3;     // P(win at bid_price)
+  float  expected_profit = 4;     // (V - bid) * P(win)
+  bool   used_fallback = 5;       // true if we did not use the model
+  int64  inference_us = 6;        // how long inference took, microseconds
+}
+
+// Sent back by the Go engine after the auction clears. Phase 3 streams these
+// into the retraining pipeline so the model learns from real outcomes.
+message AuctionOutcome {
+  string request_id = 1;
+  bool   won = 2;
+  float  clearing_price = 3;      // the winning bid amount
+  float  your_bid = 4;
+  float  profit = 5;              // (V - bid) if won, 0 if lost
+}
+
+message Ack {
+  bool ok = 1;
+}
+
+message HealthCheckRequest {
+  string service = 1;
+}
+
+message HealthCheckResponse {
+  enum ServingStatus {
+    UNKNOWN = 0;
+    SERVING = 1;
+    NOT_SERVING = 2;
+  }
+  ServingStatus status = 1;
+}

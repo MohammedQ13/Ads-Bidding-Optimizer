@@ -28,7 +28,7 @@ Round 2, L4 instance, 2026-05-08. Code rewritten from scratch.
 
 ## Direction 4: Analytical Newton bid optimizer
 - bid_optimizer.py implements Newton on the FOC -CDF(b) + (V-b)*pdf(b) = 0 with multi-start (5 starts) and damped update.
-- For MDN s42 + V=150: Newton regret=28.92 vs grid=33.13 — Newton is meaningfully better when the MDN distribution is multi-modal because the grid only samples 500 candidates and may miss a sharp local optimum.
+- For MDN s42 + V=150: Newton regret=28.92 vs grid=33.13, Newton is meaningfully better when the MDN distribution is multi-modal because the grid only samples 500 candidates and may miss a sharp local optimum.
 - For V=bidding_price the Newton step diverges in some samples (large V, multi-modal CDF), giving regret 62.45 vs grid 48.25; bidding around `V/2` is hard for Newton when the FOC has spurious roots. Did not deploy Newton for ensembles for this reason.
 
 ## Direction 5: Click/conversion model
@@ -39,14 +39,14 @@ Round 2, L4 instance, 2026-05-08. Code rewritten from scratch.
 ## Direction 6: Budget-constrained ORTB
 - Did not get to a full lambda sweep / clicks-under-budget plot. The architecture (bin probs + bid_optimizer) supports it: the Lagrangian (V-b)CDF(b) - lambda*b*CDF(b) is just a different objective in the same grid. Skipped due to time.
 
-## Single MDN K=12 (seed 42) — best after several attempts
+## Single MDN K=12 (seed 42): best after several attempts
 - 4-layer MLP 512-256-128-64. K=12 components. sigma_floor=0.05.
 - AdamW lr=1e-3, weight_decay=5e-4, dropout=0.05, ent_bonus=0.005, EMA decay=0.99, batch=8192, AMP fp16.
 - Best at epoch 0 (warmup epoch); val NLL=0.640, test NLL=0.822, ANLP_linear=4.977, KS=0.245.
 - Regret V=150 grid=33.13, V=150 newton=28.92, V=bid grid=48.25.
 - Severe overfit after epoch 0: train_loss goes to -0.08 (very tight) but val NLL goes UP to 1.5+. Sigma collapses on training, fails to generalize.
 - Stronger regularization attempts (dropout=0.3, target_jitter=0.05) prevented training entirely (val flat at 1.17).
-- Lesson: MDN with small sigma_floor + powerful embeddings is fragile under temporal split.
+- Lesson: MDN with small sigma_floor + high-capacity embeddings is fragile under temporal split.
 
 ## Ensembles
 - ensemble.py: convert each member's prediction (MDN -> integrate Gaussian mixture per integer-bin; LightGBM -> piecewise linear inverse CDF) into a discrete bin distribution, then weighted-average and recompute metrics in the bin space. Streams chunks of 10k rows so memory is bounded.
@@ -82,7 +82,7 @@ Round 2, L4 instance, 2026-05-08. Code rewritten from scratch.
 4. LightGBM was too slow per quantile to be worth integrating; abandoned.
 5. Newton optimizer is brittle on V=bidding_price; reverted to grid for ensembles.
 
-# Round 3 (2026-05-10) — focused improvements
+# Round 3 (2026-05-10): focused improvements
 
 ## Task 1: read existing code (no changes)
 Round 2's MDN baseline used batch=8192, lr=1e-3, dropout=0.05, weight_decay=5e-4, sigma_floor=0.05.
@@ -93,7 +93,7 @@ Reworked `src/lgbm_baseline.py`:
 - Skip alphas already saved on disk (resume support).
 - Added `--also_regression` flag for MAE point-estimate model.
 - Default 19 alphas (0.05..0.95 by 0.05).
-- Tuned config: 95 leaves, lr=0.12, 150 rounds → ~85 s/alpha vs ~260 s in Round 2.
+- Tuned config: 95 leaves, lr=0.12, 150 rounds -> ~85 s/alpha vs ~260 s in Round 2.
 Wrote `src/lgbm_eval.py`: predicts on test using saved q*.txt files, builds piecewise-linear CDF
 and computes ANLP, KS, V=150 grid regret, V=bid grid regret, per-advertiser regret.
 Also produces preds.npz used by ensemble + budget scripts.
@@ -104,24 +104,24 @@ Two retrains at the supposed Round 1 config:
   - epoch 0 val NLL 2.05, deteriorates to 2.37 by epoch 1. Worse than mdn_s42's 0.64.
 - mdn_sf2: batch=8192, lr=1e-3, dropout=0.2, wd=5e-4, sigma_floor=0.2 (wider Gaussians)
   - epoch 0 val NLL 1.66, regret V=150 grid=46.87 (much worse than mdn_s42's 33.13).
-  - Newton on this wider MDN gets V=150 regret=30.88 — Newton works much better on wider sigma.
+  - Newton on this wider MDN gets V=150 regret=30.88, Newton works much better on wider sigma.
 
 Conclusion: under the temporal val/test split in this round's processed data, every MDN config
 overfits sharply or under-fits via wide sigma_floor. The Round 1 number 21.13 is *not reproducible*
-with the Round 2 feature engineering / split — most likely Round 1 used a different split or different
+with the Round 2 feature engineering / split, most likely Round 1 used a different split or different
 features. The mdn_s42 ckpt remains the best MDN we have (regret 33.13 grid, 30.06 multi-start Newton).
 
 ## Task 4: improved Newton bid optimizer
 `bid_optimizer.newton_optimize_mdn`: rewrote with 8 starts spread over [0.05V, 0.95V] per row,
-damped fixed-point on FOC b' = V - CDF(b)/pdf(b), 25 iters, NaN → reset, evaluate profit at every
+damped fixed-point on FOC b' = V - CDF(b)/pdf(b), 25 iters, NaN -> reset, evaluate profit at every
 converged root and keep the best.
 `bid_optimizer.newton_optimize_bins`: piecewise-linear interp of bin CDF, same multi-start logic.
 
 Findings on full test set:
-  mdn_s42:   grid 33.134 → newton 30.064 (V=150)   [Newton helps]
-  mdn_s1:    grid 25.269 → newton 30.654           [Newton hurts]
-  bins_300:  grid 20.327 → newton 37.975           [Newton hurts a lot]
-  bins_smooth: grid 21.371 → newton 27.504         [Newton hurts]
+  mdn_s42:   grid 33.134 -> newton 30.064 (V=150)   [Newton helps]
+  mdn_s1:    grid 25.269 -> newton 30.654           [Newton hurts]
+  bins_300:  grid 20.327 -> newton 37.975           [Newton hurts a lot]
+  bins_smooth: grid 21.371 -> newton 27.504         [Newton hurts]
   Newton is consistently bad for V=bid (>70 fen) on every model; multi-modal posteriors with very
   high V have spurious roots even after multi-start.
 
@@ -134,12 +134,12 @@ simulates spending against budget = frac × oracle_cost (frac in {1/32, 1/8, 1/2
 Reports won/spent/profit/clicks_won under each budget.
 `src/budget_naive.py`: bids the train-mean payprice (78.19) every auction. Regret 28.74 V=150.
 `src/budget_ensemble.py`: same but for an ensemble; computes member probs in 10K-row chunks on
-GPU (MDN→integrate Gaussians, bins→identity, lgbm→inverse-CDF interp).
+GPU (MDN->integrate Gaussians, bins->identity, lgbm->inverse-CDF interp).
 `src/export_onnx.py`: exports `DiscreteBins + softmax` to ONNX opset-17, verifies with
 onnxruntime CPU provider (max abs diff 4.5e-7 vs PyTorch). Writes `feature_config.json` for the
 C++ server.
 
-# Round 4 (2026-05-10) — exhaustive optimization
+# Round 4 (2026-05-10): exhaustive optimization
 
 ## Tasks 1+2: read & verify
 Reproduced Round 3's `ens_mdn5_3bins (5:1:1:1)` at 19.991 fen exactly.
@@ -182,7 +182,7 @@ Reproduced Round 3's `ens_mdn5_3bins (5:1:1:1)` at 19.991 fen exactly.
 | bins_q300_emd | quantile | 300 | 21.03 |
 | bins_log300_smooth | log | 300 | 21.34 |
 
-**bins_quant200 is the new best single model** — 200 quantile-spaced bins gives more resolution where the data is dense (median region) and beats uniform 301 by 0.16 fen.
+**bins_quant200 is the new best single model**: 200 quantile-spaced bins gives more resolution where the data is dense (median region) and beats uniform 301 by 0.16 fen.
 EMD loss and label smoothing both *hurt* regret here (the soft target dilutes the bid optimizer's chosen mode).
 
 ## Task 5: wider/deeper architectures (Direction 5)
@@ -194,13 +194,13 @@ None beat the 512-256-128-64 baseline:
 - `mdn_K4_dp02`: 21.75
 - `mdn_long` (10 epochs lr=5e-4): 21.63
 
-## Tasks 6+9: Newton/calibration — skipped after Round 3 conclusions
+## Tasks 6+9: Newton/calibration: skipped after Round 3 conclusions
 Round 3 already showed Newton hurts everything except MDN at V=150 (+3 fen). Temperature scaling on bins improves NLL but not regret (Round 3). No new investigation.
 
 ## Task 6: ensemble weight search
 Two ens_search variants written: a memory-hungry one that died, then `ens_search3.py` that uses a 200K-row subset for fast trial eval and validates top candidates on full test. With 6 members (mdn_s42, mdn_c1, mdn_c4, bins_300, bins_300_s1, bins_300_s2):
 - Best subset r150 ≈ 19.97 (40+ trials in 200 random Dirichlet)
-- Validated on full: w=(49,5,4,2,0,40) → r150 = 19.981 (slightly better than Round 3's 19.991)
+- Validated on full: w=(49,5,4,2,0,40) -> r150 = 19.981 (slightly better than Round 3's 19.991)
 
 After bins_quant200 was identified, manual weight grid:
 - ens_v4_compact (49,5,4,40,2 over mdn_s42, mdn_c1, mdn_c4, bins_quant200, bins_sqrt300): **r150=19.908** <-- best
@@ -208,13 +208,13 @@ After bins_quant200 was identified, manual weight grid:
 - ens_v4_5_2_1_1 (5,2,1,1 mdn_s42 + bins_quant200 + sqrt300 + 300): r150=19.921, V=bid 43.184
 - ens_v4_6bins (6,2,1,1): 19.916, V=bid 43.198
 
-**Final best: 19.908 fen** — improvement from Round 3's 19.991 by **0.083 fen** (~0.4%).
+**Final best: 19.908 fen**: improvement from Round 3's 19.991 by **0.083 fen** (~0.4%).
 The win comes from substituting bins_quant200 (better-spaced bins) into the ensemble.
 
 ## What worked in Round 4
-1. **Dropout=0.02 for MDN** — biggest single change, recovered Round 1 regret of ~21 fen.
-2. **Quantile-spaced bins** — bins_quant200 single-model 20.17 (beats bins_300's 20.33).
-3. Substituting bins_quant200 into the ensemble dropped regret 19.99 → 19.91.
+1. **Dropout=0.02 for MDN**: biggest single change, recovered Round 1 regret of ~21 fen.
+2. **Quantile-spaced bins**: bins_quant200 single-model 20.17 (beats bins_300's 20.33).
+3. Substituting bins_quant200 into the ensemble dropped regret 19.99 -> 19.91.
 
 ## What didn't (stopping rationale)
 1. Wider/deeper architectures (both bins and MDN).
@@ -222,15 +222,15 @@ The win comes from substituting bins_quant200 (better-spaced bins) into the ense
 3. EMD loss / label smoothing on bins (worse).
 4. Smoothed-target bins on log spacing (worse).
 5. Longer training for MDN (worse).
-6. Adding LightGBM as a member (Round 3 showed it dilutes — skipped here).
+6. Adding LightGBM as a member (Round 3 showed it dilutes, skipped here).
 7. Multiple MDN seeds in ensemble (the single mdn_s42 + multiple bins is consistently best).
 8. Newton optimizer on V=bid (Round 3 already documented).
-9. Adding bidding_price as input feature — wrote dataset_aug.py but didn't train; given the consistent +1-2 fen wall, the ROI is too small.
-10. Multi-head MDN+bins model — wrote model_multi.py but didn't train; the ensemble of separate models already exploits the same diversity.
+9. Adding bidding_price as input feature, wrote dataset_aug.py but didn't train; given the consistent +1-2 fen wall, the ROI is too small.
+10. Multi-head MDN+bins model, wrote model_multi.py but didn't train; the ensemble of separate models already exploits the same diversity.
 
-The last 5 ensemble configs all landed in 19.91–20.00 fen; greedy delta-weight perturbations of the best (40,2,5,4,1,0,...) all settled in [19.91, 20.00]. We're at the temporal-split ceiling for this dataset.
+The last 5 ensemble configs all landed in 19.91-20.00 fen; greedy delta-weight perturbations of the best (40,2,5,4,1,0,...) all settled in [19.91, 20.00]. We're at the temporal-split ceiling for this dataset.
 
 ## Best model summary
-- **Best single model**: `bins_quant200` — 200 bins at training-payprice quantiles. r150=20.17, KS=0.18.
+- **Best single model**: `bins_quant200`, 200 bins at training-payprice quantiles. r150=20.17, KS=0.18.
 - **Best ensemble**: `ens_v4_compact` weights (49,5,4,40,2) over (mdn_s42, mdn_c1, mdn_c4, bins_quant200, bins_sqrt300). r150=**19.908**, V=bid=43.327, ANLP=3.79, KS=0.24.
-- Best V=bid grid: ens_v4_5_2_1_1 → 43.184.
+- Best V=bid grid: ens_v4_5_2_1_1 -> 43.184.

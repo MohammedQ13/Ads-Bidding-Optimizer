@@ -90,7 +90,7 @@ class MDN(nn.Module):
 
 class DiscreteBins(nn.Module):
     """Softmax over discrete price bins. Predicts P(payprice == k).
-    Simpler than MDN -- just output probability for each integer price.
+    Simpler than MDN - just output probability for each integer price.
     """
 
     def __init__(self, vocab_sizes, emb_dims, tag_vocab_size, tag_emb_dim,

@@ -1,0 +1,19 @@
+-- t=16 b=64 --
+engine throughput: 16 threads, batch 64, 10s
+throughput: 932531 bids/sec
+-- t=16 b=128 --
+engine throughput: 16 threads, batch 128, 10s
+throughput: 955719 bids/sec
+-- t=20 b=128 --
+engine throughput: 20 threads, batch 128, 10s
+throughput: 956646 bids/sec
+-- t=24 b=128 --
+engine throughput: 24 threads, batch 128, 10s
+throughput: 952743 bids/sec
+-- t=16 b=256 --
+engine throughput: 16 threads, batch 256, 10s
+throughput: 967092 bids/sec
+engine throughput: 16 threads, batch 256, 30s
+evaluated 28963328 bids in 30.01s
+throughput: 965225 bids/sec
+per-bid: 1.04 us

@@ -1,0 +1,89 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "schemaVersion": 39,
+  "title": "RTB Bidder Scoreboard",
+  "tags": ["rtb", "bidder"],
+  "time": { "from": "now-15m", "to": "now" },
+  "refresh": "5s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Request rate (QPS) by company",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum by (dsp_id) (rate(bid_request_total[1m]))",
+          "legendFormat": "{{dsp_id}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "p99 GetBid latency",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, dsp_id) (rate(bid_request_latency_seconds_bucket[1m])))",
+          "legendFormat": "{{dsp_id}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Cumulative profit (the scoreboard)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum by (dsp_id) (bid_profit_total)",
+          "legendFormat": "{{dsp_id}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Win rate (trailing 1m)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum by (dsp_id) (rate(bid_auction_won_total[1m])) / clamp_min(sum by (dsp_id) (rate(bid_auction_won_total[1m]) + rate(bid_auction_lost_total[1m])), 0.001)",
+          "legendFormat": "{{dsp_id}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Circuit breaker state (0 closed / 1 open / 2 half-open)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 16 },
+      "targets": [
+        { "expr": "bid_circuit_breaker_state", "legendFormat": "{{dsp_id}}" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Fallback rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 16 },
+      "targets": [
+        {
+          "expr": "sum by (dsp_id) (rate(bid_fallback_total[1m]))",
+          "legendFormat": "{{dsp_id}}"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Cold-start lookups",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 16 },
+      "targets": [
+        { "expr": "bid_cold_start_lookup_total", "legendFormat": "{{dsp_id}}" }
+      ]
+    }
+  ]
+}

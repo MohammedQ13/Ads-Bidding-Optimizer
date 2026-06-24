@@ -35,3 +35,21 @@ Thumbs.db
 notes.txt
 config.txt
 
+# C++ build output
+cpp-bidder/build/
+
+# Go engine: generated gRPC stubs, built binary, and local sample data
+go-engine/gen/
+go-engine/engine
+go-engine/_sample/
+
+# retrainer python cache
+retrainer/__pycache__/
+
+# The deployment model the C++ server loads is a tracked artifact (the server
+# is not runnable without it), unlike the training checkpoints under exports/.
+!cpp-bidder/models/bid_model.onnx
+# The retrainer's warm-start checkpoint is a tracked artifact too (the feedback
+# loop is not runnable without it), unlike the rest of the training checkpoints.
+!retrainer/models/warm_start.pt
+
